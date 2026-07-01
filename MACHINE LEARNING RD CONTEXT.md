@@ -27,11 +27,24 @@
 |Source|Description|Format|
 |-|-|-|
 |Renewables.ninja API|Solar and wind resource data for Coclé, Penonomé, Panama (lat=8.52, lon=-80.36). MERRA-2 reanalysis. 859 MW solar / 336 MW wind. Full year 2025.|REST API → JSON|
-|`solar\\\\\\\_eolica\\\\\\\_hidro\\\\\\\_horario\\\\\\\_2025.parquet`|Real ETESA metered generation: `solar\\\\\\\_mw\\\\\\\_real`, `eolica\\\\\\\_mw\\\\\\\_real`, `hidro\\\\\\\_mw\\\\\\\_real`. Hourly, 2025.|Parquet|
-|`DEM2025.xlsx`|Real ETESA hourly electricity demand 2025. Wide format (date × 24 hours).|Excel|
+|`solar\\\\\\\_eolica\\\\\\\_hidro\\\\\\\_horario\\\\\\\_2025.csv`|Real ETESA metered generation: `solar\\\\\\\_mw\\\\\\\_real`, `eolica\\\\\\\_mw\\\\\\\_real`, `hidro\\\\\\\_mw\\\\\\\_real`. Hourly, 2025.|CSV|
+|`DEM2025.csv`|Real ETESA hourly electricity demand 2025. Wide format (date × 24 hours).|CSV|
 
 **Calibration:** `ratio\\\\\\\_calib = solar\\\\\\\_mw\\\\\\\_real / solar\\\\\\\_ninja` applied to `irradiance\\\\\\\_direct` and
 `irradiance\\\\\\\_diffuse` to align the MERRA-2 reanalysis signal with observed Panamanian conditions.
+
+**Limitations (affects how results should be read):**
+
+1. **Perfect-foresight weather.** The four `\_h24` meteorological features are the true future
+MERRA-2 reanalysis value at t+24 (built with `shift(-24)`), not an operational forecast — the full
+year is pulled from the API in one request. Reported metrics therefore assume a *perfect 24-hour
+weather forecast* and are an optimistic upper bound; a real day-ahead deployment would use NWP
+(e.g. GFS/ECMWF) whose forecast error would raise the reported MAPE/WAPE.
+
+2. **Leakage-safe hydro baseline.** The seasonal-diurnal hydro features (`hidro\_typical\_h24`,
+`hidro\_anomaly\_L24`) are rebuilt inside each rolling window from *training-only* data, so no window
+sees a `(month, hour)` hydro average that includes months past its own cutoff. (Earlier versions
+computed this profile once over the full year before the rolling loop — a look-ahead leak.)
 
 \---
 

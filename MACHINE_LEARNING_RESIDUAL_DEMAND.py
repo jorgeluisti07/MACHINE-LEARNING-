@@ -60,22 +60,12 @@ MAX_LAG = LAG_2
 # ────────────────────────────────────────────────────────────────────────────
 
 import requests, json as _json
-# requests: used to call the Renewables.ninja REST API and download solar/wind resource data.
-# json (aliased _json): parse the API response from JSON format into a Python dictionary.
-
 import pandas as pd
-# pandas: the main library for tabular data manipulation throughout the notebook.
-
 import numpy as np
-# numpy: numerical array operations, used for math (sin, cos, exp) and metric computations.
-
 import matplotlib.pyplot as plt
-# matplotlib: all plots (time-series, error bars, histograms, feature importance bar charts).
 
 pd.set_option("display.max_rows",    None)
 pd.set_option("display.max_columns", None)
-# Show the full DataFrame when we call df in a cell, without truncation.
-# Useful during development to inspect all 31 columns.
 
 from geopy.geocoders import Nominatim
 
@@ -178,7 +168,7 @@ df_combined = pd.concat([
 # Concatenate the solar columns and the wind columns side by side (axis=1).
 # dropna() removes any hour where at least one API value is missing.
 
-# ── Load ETESA real-generation data from Parquet ─────────────────────────────────
+# ── Load ETESA real-generation data from CSV ─────────────────────────────────────
 real = pd.read_csv('solar_eolica_hidro_horario_2025.csv', index_col=0, parse_dates=True)
 real.index = pd.to_datetime(real.index)
 # Read the CSV file. index_col=0 restores the datetime index, parse_dates ensures
@@ -190,9 +180,9 @@ df_combined  = df_combined.drop(columns=cols_to_drop).join(real, how='left')
 # Drop any duplicate columns before joining, then left-join to keep every ninja row
 # and attach the real ETESA generation columns.
 
-# ── Load ETESA real demand from Excel ────────────────────────────────────────────
+# ── Load ETESA real demand from CSV ──────────────────────────────────────────────
 demanda_raw = pd.read_csv('DEM2025.csv')
-# CSV already has clean headers: Unnamed:0 (dates), H1..H24 (hourly demand).
+# Wide CSV: first column = dates (Unnamed: 0), H1..H24 = hourly demand.
 
 demanda_raw = demanda_raw.rename(columns={demanda_raw.columns[0]: 'fecha'})
 # Rename the first column to 'fecha' for clarity.
@@ -388,18 +378,23 @@ df['residual_L168'] = df['demanda_residual'].shift(LAG_3)
 df['residual_L48']  = df['demanda_residual'].shift(48)
 # 48-hour lag (2 days): captures the mid-week demand build-up pattern.
 
-# NWP Horizon features at t+24
-# Meteorological forecast at the prediction horizon.
-# Standard in day-ahead operational forecasting.
-# Here we use MERRA-2 reanalysis as a perfect-foresight proxy.
-# irradiance_direct_h24 was feature importance #3 in XGBoost (gain = 0.080).
-# Adding these 4 features reduced DNN MAPE from ~9.3 % to 7.08 % (−2.35 pp).
+# NWP Horizon features at t+24 — the h=24 meteorology at the prediction target time.
+# irradiance_direct_h24 is XGBoost feature importance #3 (gain = 0.080); adding these 4
+# features reduced DNN MAPE from ~9.3 % to 7.08 % (−2.35 pp).
+#
+# ── LIMITATION: PERFECT-FORESIGHT WEATHER ─────────────────────────────────────
+# These four features are built with shift(-HORIZON), i.e. the TRUE future value of
+# the MERRA-2 reanalysis, not an actual forecast. The full year was pulled from the
+# Renewables.ninja API in one request, so at "prediction time" the model is handed
+# the exact weather that will occur 24 h later. Results therefore assume a PERFECT 24 h
+# weather forecast and are an optimistic upper bound. A real day-ahead deployment would
+# feed operational NWP (e.g. GFS/ECMWF) instead, whose forecast error would raise the
+# reported MAPE/WAPE. Treat the h24 weather block as a perfect-foresight proxy.
+# ──────────────────────────────────────────────────────────────────────────────
 df['irradiance_direct_h24']  = df['irradiance_direct'].shift(-HORIZON)
 df['irradiance_diffuse_h24'] = df['irradiance_diffuse'].shift(-HORIZON)
 df['temperature_h24']        = df['temperature'].shift(-HORIZON)
 df['wind_speed_h24']         = df['wind_speed'].shift(-HORIZON)
-# shift(-24) places the value that occurs 24 hours in the future alongside the current row,
-# making the h=24 NWP forecast available as a feature at training and prediction time.
 
 # Hydro dispatch features
 # Note: hidro_mw itself is already in the feature set, but its LEVEL is dangerous
@@ -418,16 +413,19 @@ df['hidro_delta_L24'] = (
 ).fillna(0)
 # Day-over-day trend in hydro dispatch. Positive = reservoir building, negative = drawing down.
 
+# Seasonal-diurnal hydro baseline = (month, hour) mean of hidro_mw.
+# NOTE: the full-year profile below is used ONLY for EDA / correlation plots and to keep
+# the column layout fixed. During modelling these two columns are REBUILT per rolling
+# window from training-only data by rebuild_hidro_profile_features() (see get_targets_features),
+# so no window is fed a seasonal average that includes months past its own cutoff.
 _hidro_profile = df.groupby(['month', 'hour'])['hidro_mw'].transform('mean')
-# Compute the typical hydro dispatch for each (month, hour) combination across the full year.
-# This is the seasonal-diurnal hydro baseline.
 
+# hidro_typical_h24 = expected hydro at the forecast horizon (h+24).
 df['hidro_typical_h24'] = _hidro_profile.shift(-HORIZON)
-# The expected hydro level at the forecast horizon (h+24), based on the seasonal profile.
 
+# hidro_anomaly_L24 = yesterday's deviation of actual hydro from its seasonal baseline
+# (positive = surplus reservoir conditions; negative = drought / low-water stress).
 df['hidro_anomaly_L24'] = (df['hidro_mw'] - _hidro_profile).shift(LAG_1)
-# Yesterday's deviation of actual hydro from its seasonal baseline.
-# Positive = surplus reservoir conditions; Negative = drought / low-water stress signal.
 
 # Target at h+24
 df['demanda_residual_h24'] = df['demanda_residual'].shift(-HORIZON)
@@ -656,10 +654,37 @@ print(f'Models:   {_cols}')
 # ────────────────────────────────────────────────────────────────────────────
 
 from sklearn.preprocessing import StandardScaler
-# StandardScaler fits a mean and standard deviation to the training data,
-# then transforms it to zero mean and unit variance.
-# It is applied to both X and Y for the DNN (for neural networks).
-# It is NOT applied for XGBoost because gradient-boosted trees do not need normalised inputs.
+# Applied to X and Y for the DNN only. XGBoost is scale-invariant, so scale=False there.
+
+
+def rebuild_hidro_profile_features(df_in, T):
+    """
+    Recompute the seasonal-diurnal hydro features from TRAINING ROWS ONLY (rows < T).
+
+    Why this exists — leakage prevention:
+    `hidro_typical_h24` and `hidro_anomaly_L24` both depend on a (month, hour) mean of
+    `hidro_mw`. If that mean is taken once over the full dataset it lets an early rolling
+    window "see" hydro levels from months that come after its own cutoff. Here the profile
+    is fitted on rows [:T] only and mapped onto every row by calendar key (month, hour) —
+    the key itself is not leakage. (month, hour) combinations not yet observed in training
+    fall back to the training-window mean of `hidro_mw`.
+
+    Returns a copy of df_in with the two hydro-profile columns overwritten for cutoff T.
+    """
+    train_profile = df_in.iloc[:T].groupby(['month', 'hour'])['hidro_mw'].mean()
+    train_mean    = df_in['hidro_mw'].iloc[:T].mean()
+    keys          = zip(df_in['month'].to_numpy(), df_in['hour'].to_numpy())
+    base          = pd.Series([train_profile.get(k, train_mean) for k in keys],
+                              index=df_in.index, dtype=float)
+
+    out = df_in.copy()
+    # Expected hydro at the forecast horizon (h+24); fillna(base) covers the final rows
+    # where shift(-HORIZON) has no successor.
+    out['hidro_typical_h24'] = base.shift(-HORIZON).fillna(base)
+    # Yesterday's deviation of actual hydro from its (training-only) seasonal baseline.
+    out['hidro_anomaly_L24'] = (out['hidro_mw'] - base).shift(LAG_1).fillna(0.0)
+    return out
+
 
 def get_targets_features(df_in, T, scale=False):
     """
@@ -669,37 +694,31 @@ def get_targets_features(df_in, T, scale=False):
     ----------
     df_in  : DataFrame — the full dataset with all 30 features and the target column.
     T      : int       — training cutoff (number of rows used for training).
-    scale  : bool      — if True, apply StandardScaler to X and Y (for DNN).
+    scale  : bool      — if True, apply StandardScaler to X and Y (for DNN);
                          if False, return raw arrays (for XGBoost).
 
     Returns
     -------
     scale=False → (Y_train, X_train, X_test)
-    scale=True  → (Y_train, X_train, X_test, sx, sy)
-                   where sx = feature scaler, sy = target scaler.
+    scale=True  → (Y_train, X_train, X_test, sx, sy)   # sx, sy = fitted feature/target scalers
 
-    The test window covers the next HORIZON=24 rows starting at row T.
+    The test window covers the next HORIZON=24 rows starting at row T. The seasonal hydro
+    features are rebuilt from training-only data (see rebuild_hidro_profile_features) so no
+    window is fed information past its own cutoff.
     """
+    df_in = rebuild_hidro_profile_features(df_in, T)
+
     Y_train = df_in[[target_h24]].iloc[:T].copy()
-    # Target column for rows 0…T-1. Shape: (T, 1).
-
     X_train = df_in[features_h24].iloc[:T].copy()
-    # Feature matrix for rows 0…T-1. Shape: (T, 30).
-
     X_test  = df_in[features_h24].iloc[T:T + HORIZON].copy()
-    # Feature matrix for the next 24 rows (one day-ahead forecast window). Shape: (24, 30).
 
     if scale:
+        # Fit scalers on training data only — never on test data (would leak).
         sx = StandardScaler().fit(X_train)
         sy = StandardScaler().fit(Y_train)
-        # Fit scalers on training data only — never on test data (would cause data leakage).
-
         X_train = pd.DataFrame(sx.transform(X_train), columns=X_train.columns)
         X_test  = pd.DataFrame(sx.transform(X_test),  columns=X_test.columns)
         Y_train = pd.DataFrame(sy.transform(Y_train), columns=Y_train.columns)
-        # Apply the same fitted scaler to transform training and test features.
-        # X_test uses the scaler fitted on X_train (same mean and std).
-
         return Y_train, X_train, X_test, sx, sy
 
     return Y_train, X_train, X_test
@@ -1341,3 +1360,37 @@ plt.suptitle(
     fontsize=12, y=1.02)
 plt.tight_layout()
 plt.show()
+
+# ────────────────────────────────────────────────────────────────────────────
+# Results summary — relative AND absolute error
+# Percentage metrics (MAPE, WAPE) show relative accuracy; MAE and RMSE report the same
+# errors in MW so the operational magnitude is explicit alongside the ratios. RMSE ≥ MAE,
+# and the gap between them grows with the largest misses (RMSE penalises them more).
+# ────────────────────────────────────────────────────────────────────────────
+
+def rmse_mw(actual, predicted):
+    """Root mean squared error in MW."""
+    return float(np.sqrt(mean_squared_error(actual, predicted)))
+
+_test_actual = df[target_h24].iloc[T:T + n_test_hours].values.astype(float)
+_summary_rows = {
+    'DNN':     forecasts['deep_network'][target_h24].iloc[T:T + n_test_hours].values.astype(float),
+    'XGBoost': forecasts['xgboost'][target_h24].iloc[T:T + n_test_hours].values.astype(float),
+    'Naive':   naive_preds.astype(float),
+}
+
+results_summary = pd.DataFrame(
+    [
+        {
+            'MAPE_%':  compute_metrics(_test_actual, _p)[0] * 100,
+            'WAPE_%':  compute_metrics(_test_actual, _p)[1] * 100,
+            'MAE_MW':  mean_absolute_error(_test_actual, _p),
+            'RMSE_MW': rmse_mw(_test_actual, _p),
+        }
+        for _p in _summary_rows.values()
+    ],
+    index=list(_summary_rows.keys()),
+).round({'MAPE_%': 2, 'WAPE_%': 2, 'MAE_MW': 1, 'RMSE_MW': 1})
+
+print('Test-period results (h=24, ' + f'{n_test_days} rolling days):')
+print(results_summary.to_string())
