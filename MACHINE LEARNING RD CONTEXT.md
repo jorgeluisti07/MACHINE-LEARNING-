@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26 | DNN + XGBoost | Lagged Approach | Leakage-fixed
+**Version:** v26.1 | DNN + XGBoost | Lagged Approach | Leakage-fixed | Post-fix results confirmed
 **Companion files:** `MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb`, `MACHINE_LEARNING_RESIDUAL_DEMAND.py`, `README.md` (How to Run)
 
 ---
@@ -10,8 +10,9 @@
 - **Problem:** day-ahead (h+24) residual demand forecasting for Panama, DNN vs XGBoost, expanding-window rolling validation.
 - **Inputs are CSV, not Excel/Parquet.** `DEM2025.csv` (wide, `H1`..`H24`) and `solar_eolica_hidro_horario_2025.csv` (long). See §1.
 - **Two known limitations baked into the methodology** (not bugs, but must be disclosed in the thesis): perfect-foresight h+24 weather, and a previously-leaky hydro baseline that has since been fixed. See §7.
-- **§9 results (7.08% / 7.35% MAPE) predate the hydro-leakage fix** — they need to be regenerated after re-running the notebook. Treat them as historical/pre-fix until refreshed.
-- Full history of what went wrong and what was fixed is in **§8 Fixes Log** — check it before "discovering" an issue that's already been handled.
+- **§9 has the confirmed post-leakage-fix results** (DNN 7.02% / XGB 7.31% MAPE, MAE ~70 MW) — the fix slightly *improved* accuracy while making the methodology honest. The pre-fix numbers are kept for comparison.
+- **§10 is the optimization roadmap** — prioritized, evidence-based ideas to boost precision, derived from the post-fix feature-importance and error plots. Implement top-down; each item states its expected payoff and risk.
+- Full history of what went wrong and what was fixed is in **§8 Fixes Log** — check it before "discovering" an issue that's already been handled. **§11 has revert instructions** (git commits) if any change needs to be undone.
 
 ---
 
@@ -207,19 +208,89 @@ The four `*_h24` meteorological features (`irradiance_direct_h24`, `irradiance_d
 | 4 | Results only reported percentage error (MAPE/WAPE); no absolute-MW magnitude | End-of-notebook results section | Added `results_summary` table: MAPE %, WAPE %, MAE MW, RMSE MW per model (DNN/XGBoost/Naive) | ✅ Added, dry-run verified |
 | 5 | Excessive line-by-line "what it does" comments in core pipeline cells (imports, feature extraction) | Throughout `.py`/`.ipynb` | Trimmed to docstrings, section headers, and "why" comments only | ✅ Done |
 | 6 | Hardcoded Renewables.ninja API token in source | Data-download cell | **Not fixed** — flagged to the user, out of scope of the requested changes | ⚠️ Open — rotate the token and move to an env var before any public sharing |
+| 7 | §9 results were stale (pre-leakage-fix) | This doc | Notebook re-run after the fix; post-fix results recorded in §9.1 (DNN 7.02%, XGB 7.31%, MAE ~70 MW), pre-fix kept in §9.2 for comparison. Fix confirmed harmless-to-beneficial for accuracy | ✅ Verified from re-run output |
+| 8 | Error spikes on holiday-adjacent days despite `is_holiday` feature; several near-zero-importance features | Post-fix diagnostics (feature importance T_last=8368, error plots) | Documented as prioritized optimization roadmap (§10, P1–P7) — not yet implemented; implement one at a time and record deltas here | 📋 Roadmap written, pending implementation |
 
 **How this file stays useful:** when something in the notebook/script turns out wrong or gets fixed, add a row here rather than just fixing it silently — that's what makes this doc worth reading before starting new work on the pipeline.
 
 ---
 
-## 9. Results (⚠️ PRE-LEAKAGE-FIX — regenerate before citing in the thesis)
+## 9. Results
 
-| Model | Test MAPE | Test WAPE | Test sMAPE | R² | vs Naive | Overfit |
+### 9.1 Current results — POST-leakage-fix (v26, confirmed from re-run)
+
+| Model | Test MAPE | Test WAPE | Test sMAPE | R² | MAE (MW) | vs Naive |
 |---|---|---|---|---|---|---|
-| **DNN** | **7.08%** | **0.0616** | **6.66%** | **0.7765** | **38.8%** | 0.79 pp |
-| XGBoost | 7.35% | 0.0621 | 6.74% | 0.7539 | 36.4% | 2.75 pp |
+| **DNN** | **7.02%** | **0.0611** | **6.58%** | **0.7790** | **69.7** | **39.3%** |
+| XGBoost | 7.31% | 0.0618 | 6.70% | 0.7550 | 70.5 | 36.8% |
 | Naive | 11.57% | 0.1017 | 11.24% | 0.3563 | — | — |
 
-**Test period:** ~2025-11-02 → ~2025-12-30 (58 rolling days). **Training cutoff:** T = 7000 hours.
+**Test period:** ~2025-11-02 → ~2025-12-30 (58 rolling days). **Training cutoff:** T = 7000; final-iteration cutoff T_last = 8368.
+(RMSE is also computed in the notebook's `results_summary` table — record it here on the next run.)
 
-**These numbers were produced before the §7.2/§8-#3 hydro-leakage fix.** Re-run the notebook (requires live Renewables.ninja API access + interactive geocoding input, see README "How to Run") and replace this table — including the new MAE/RMSE columns from `results_summary` — once refreshed.
+### 9.2 Historical results — PRE-leakage-fix (v25, keep for comparison, do not cite as current)
+
+| Model | Test MAPE | Test WAPE | Test sMAPE | R² | Overfit |
+|---|---|---|---|---|---|
+| DNN | 7.08% | 0.0616 | 6.66% | 0.7765 | 0.79 pp |
+| XGBoost | 7.35% | 0.0621 | 6.74% | 0.7539 | 2.75 pp |
+
+**Key methodological finding (worth a paragraph in the thesis):** fixing the hydro-baseline leak did **not** degrade accuracy — DNN improved 7.08%→7.02% and XGBoost 7.35%→7.31%. The leaked full-year hydro average was apparently adding noise, not signal, to early windows. The corrected pipeline is both honest and marginally better.
+
+---
+
+## 10. Optimization Roadmap — evidence-based, prioritized
+
+Derived from the post-fix diagnostics (XGBoost feature-importance chart at T_last=8368, absolute-error time series, 7-day zoom plots, per-feature time-series panels, correlation matrix). Ordered by expected payoff ÷ effort. Implement one at a time, re-run, and record the delta in §8 — never batch several model changes into one run or you can't attribute the gain.
+
+### P1 — Holiday-proximity features (targets the two biggest error events)
+**Evidence:** the two largest error spikes (~480 MW, ~7× the 69.7 MW MAE) occur around Nov 26–28 and Dec 22–25 — both adjacent to national holidays (Nov 28, Dec 25) — yet `is_holiday` has near-zero XGBoost gain. A same-day binary flag can't capture bridge days, eves, or the demand ramp-down before/after a holiday.
+**Action:** add `days_to_next_holiday` and `days_since_last_holiday` (clipped to e.g. ±3), and/or `is_holiday_adjacent`. Cheap, leakage-free (the holiday calendar is known in advance — genuinely available at forecast time).
+**Expected impact:** directly attacks the tail errors that dominate RMSE; may not move MAPE much but should cut the worst days.
+
+### P2 — Prune dead features (simplify + reduce variance)
+**Evidence:** bottom of the importance chart: `hidro_mw`, `is_holiday`, `hidro_fraction_L24`, `hidro_anomaly_L24`, `residual_L48`, `temperature`, `irradiance_diffuse`, `eolica_mw` all contribute < ~0.01 gain each. Also `hour`/`hour_sin`/`hour_cos` triple-encode the same signal for XGBoost.
+**Action:** ablation run with the bottom ~6 features removed (keep the calendar encodings for the DNN — cyclic features matter there even if trees ignore them; consider *separate* feature lists per model).
+**Expected impact:** small accuracy change either way, but a leaner model, faster rolling loop, and a clean "feature ablation" subsection for the thesis. If accuracy holds, keep the pruned set.
+
+### P3 — Simple ensemble: average DNN + XGBoost
+**Evidence:** the two models' error bursts don't fully coincide in the plots (different hours miss differently); their test MAPEs are within 0.3 pp of each other — the classic setup where a 50/50 average beats both.
+**Action:** `pred_ens = 0.5*pred_dnn + 0.5*pred_xgb` on the stored `forecasts` DataFrames — zero retraining needed, one cell. Optionally tune the weight on the *validation* tail only (not test!).
+**Expected impact:** typically 0.1–0.4 pp MAPE improvement for free. Report as a third model row.
+
+### P4 — Ramp/persistence-error features (targets the systematic lag)
+**Evidence:** the 7-day zoom shows both models trailing fast ramps — over-reliance on `demanda_residual` (importance ~0.29 = persistence anchor).
+**Action:** add `residual_delta_3h = residual(t) − residual(t−3)` and yesterday's persistence error `naive_error_L24 = residual(t−24) − residual(t−48)`-style features (all backward-looking → leakage-free).
+**Expected impact:** helps the model anticipate ramps instead of following them one step late.
+
+### P5 — XGBoost hyperparameter sweep (close the 0.3 pp gap to the DNN)
+**Evidence:** XGB overfit gap (2.75 pp pre-fix) is much larger than the DNN's (0.79 pp) — under-regularized for the seasonal shift into the dry-season test period.
+**Action:** small grid around the current config on the *validation* tail: `max_depth ∈ {4,5,6}`, `learning_rate ∈ {0.02,0.03,0.05}`, `min_child_weight ∈ {1,5,10}`, `subsample/colsample ∈ {0.7,0.8,0.9}`. Never tune on the test window.
+**Expected impact:** modest; mainly reduces the train/test gap.
+
+### P6 — Quantile/pinball or Huber loss (robustness to spike days)
+**Evidence:** the error distribution is spiky (a few ~400–500 MW days vs 70 MW MAE) — squared-error training over-weights those days at the expense of typical days.
+**Action:** try `objective='reg:pseudohubererror'` in XGBoost and/or Huber loss in the DNN. Alternatively train P10/P50/P90 quantile models — an uncertainty band is a strong thesis addition for operational dispatch framing.
+**Expected impact:** more stable typical-day accuracy; quantiles add operational value beyond point MAPE.
+
+### P7 — Pipeline flow (code quality, no accuracy change)
+- Replace the `globals()['model_dnn'+str(T_day)] = ...` per-iteration artifact stashing with a plain dict (`artifacts[T_day] = {...}`) — same inspectability, no namespace pollution, easier to serialize.
+- Cache `rebuild_hidro_profile_features` per `T_day` if the rolling loop feels slow (it recomputes an O(N) map twice per day — once for DNN, once for XGB, same T_day).
+- Factor the duplicated DNN/XGB plotting blocks into one `plot_model_results(name, preds, ...)` helper.
+
+### Experimental models policy
+Keep non-selected/experimental models (e.g. earlier LSTM attempts, alternative feature sets) **in the repository** — in the notebook under a clearly-labeled "Experimental / not selected" section or an `experiments/` folder. Weaker results are still evidence: the thesis should explain what was tried and why it lost (e.g. "NWP h+24 features made LSTM's temporal-persistence advantage redundant", §4.2). Never delete a failed experiment; label it.
+
+---
+
+## 11. Change Log & Revert Instructions
+
+All changes land as focused git commits on branch `claude/boris-skill-install-cm0y3t`, so any step can be undone independently with `git revert <hash>`.
+
+| Commit | Contents | To undo |
+|---|---|---|
+| `698be5f` | Hydro-leakage fix (`rebuild_hidro_profile_features`), perfect-foresight notes, CSV comment fixes, README.md created, comment cleanup, MAE/RMSE results table — in both `.py` and `.ipynb` | `git revert 698be5f` (restores the leaky behavior — don't, unless reproducing v25 numbers) |
+| `71f7120` | This reference doc reorganized v25→v26 (TL;DR, Limitations, Fixes Log) | `git revert 71f7120` |
+| *latest on this file* | v26.1: post-fix results recorded, §10 optimization roadmap, this revert table | Find it with `git log --oneline -- "MACHINE LEARNING RD CONTEXT.md"`, then `git revert <hash>` |
+
+To reproduce the **pre-fix (v25) numbers** for a thesis comparison table: `git stash && git checkout 698be5f~1 -- MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb`, re-run, then `git checkout HEAD -- MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb && git stash pop`. (Or simply cite §9.2 — the pre-fix numbers are preserved there.)
