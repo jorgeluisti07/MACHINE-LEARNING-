@@ -1265,7 +1265,7 @@ importance_xgb = pd.Series(
 plt.figure(figsize=(9, 7))
 importance_xgb.plot(kind='barh', color='darkorange')
 # Horizontal bar chart: each bar = one feature, length = importance gain.
-plt.title(f'XGBoost h=24 — Feature Importance v25 (T={T_last})')
+plt.title(f'XGBoost h=24 — Feature Importance v26 (T={T_last})')
 plt.xlabel('Importance (gain)')
 plt.tight_layout()
 plt.show()
@@ -1356,7 +1356,7 @@ for ax, (name, preds), color in zip(axes, all_preds.items(), ['orange', 'darkora
     # individual forecast cycles unreadable.
 
 plt.suptitle(
-    'v25 — DNN vs XGBoost | Lagged Approach | 30 Features | First 7 Test Days',
+    'v26 — DNN vs XGBoost | Lagged Approach | 30 Features | First 7 Test Days',
     fontsize=12, y=1.02)
 plt.tight_layout()
 plt.show()

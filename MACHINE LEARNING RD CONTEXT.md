@@ -226,7 +226,9 @@ The four `*_h24` meteorological features (`irradiance_direct_h24`, `irradiance_d
 | Naive | 11.57% | 0.1017 | 11.24% | 0.3563 | — | — |
 
 **Test period:** ~2025-11-02 → ~2025-12-30 (58 rolling days). **Training cutoff:** T = 7000; final-iteration cutoff T_last = 8368.
-(RMSE is also computed in the notebook's `results_summary` table — record it here on the next run.)
+(RMSE is also computed in the notebook's `results_summary` table — record it here on the next run.
+Naive-row WAPE/sMAPE/R² are carried over from v25: the persistence benchmark is unaffected by the
+hydro fix by construction; only its MAPE 11.57% was visually re-confirmed from the re-run plots.)
 
 ### 9.2 Historical results — PRE-leakage-fix (v25, keep for comparison, do not cite as current)
 
