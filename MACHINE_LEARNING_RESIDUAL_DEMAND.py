@@ -1373,10 +1373,19 @@ def rmse_mw(actual, predicted):
     return float(np.sqrt(mean_squared_error(actual, predicted)))
 
 _test_actual = df[target_h24].iloc[T:T + n_test_hours].values.astype(float)
+_pred_dnn = forecasts['deep_network'][target_h24].iloc[T:T + n_test_hours].values.astype(float)
+_pred_xgb = forecasts['xgboost'][target_h24].iloc[T:T + n_test_hours].values.astype(float)
+
+# Ensemble (roadmap P3): unweighted mean of the two models' stored forecasts.
+# No retraining involved — the DNN and XGBoost miss on different hours, so
+# averaging tends to cancel part of each model's error.
+_pred_ens = 0.5 * (_pred_dnn + _pred_xgb)
+
 _summary_rows = {
-    'DNN':     forecasts['deep_network'][target_h24].iloc[T:T + n_test_hours].values.astype(float),
-    'XGBoost': forecasts['xgboost'][target_h24].iloc[T:T + n_test_hours].values.astype(float),
-    'Naive':   naive_preds.astype(float),
+    'DNN':      _pred_dnn,
+    'XGBoost':  _pred_xgb,
+    'Ensemble': _pred_ens,
+    'Naive':    naive_preds.astype(float),
 }
 
 results_summary = pd.DataFrame(

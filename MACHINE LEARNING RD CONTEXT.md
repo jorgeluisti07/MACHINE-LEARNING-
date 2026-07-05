@@ -210,6 +210,7 @@ The four `*_h24` meteorological features (`irradiance_direct_h24`, `irradiance_d
 | 6 | Hardcoded Renewables.ninja API token in source | Data-download cell | **Not fixed** — flagged to the user, out of scope of the requested changes | ⚠️ Open — rotate the token and move to an env var before any public sharing |
 | 7 | §9 results were stale (pre-leakage-fix) | This doc | Notebook re-run after the fix; post-fix results recorded in §9.1 (DNN 7.02%, XGB 7.31%, MAE ~70 MW), pre-fix kept in §9.2 for comparison. Fix confirmed harmless-to-beneficial for accuracy | ✅ Verified from re-run output |
 | 8 | Error spikes on holiday-adjacent days despite `is_holiday` feature; several near-zero-importance features | Post-fix diagnostics (feature importance T_last=8368, error plots) | Documented as prioritized optimization roadmap (§10, P1–P7) — not yet implemented; implement one at a time and record deltas here | 📋 Roadmap written, pending implementation |
+| 9 | **P3 implemented:** `Ensemble = 0.5·(DNN + XGBoost)` added as a **fourth row** of `results_summary` (DNN/XGBoost/Naive rows unchanged, no retraining — averages the stored test forecasts) | Results-summary block, both `.py` and `.ipynb` | Adversarially reviewed (slices/shapes/leakage all confirmed clean). **Pending: re-run the final cells locally and record the Ensemble MAPE/WAPE/MAE/RMSE delta here** | 🔄 Code in, awaiting re-run numbers |
 
 **How this file stays useful:** when something in the notebook/script turns out wrong or gets fixed, add a row here rather than just fixing it silently — that's what makes this doc worth reading before starting new work on the pipeline.
 
@@ -255,10 +256,10 @@ Derived from the post-fix diagnostics (XGBoost feature-importance chart at T_las
 **Action:** ablation run with the bottom ~6 features removed (keep the calendar encodings for the DNN — cyclic features matter there even if trees ignore them; consider *separate* feature lists per model).
 **Expected impact:** small accuracy change either way, but a leaner model, faster rolling loop, and a clean "feature ablation" subsection for the thesis. If accuracy holds, keep the pruned set.
 
-### P3 — Simple ensemble: average DNN + XGBoost
+### P3 — Simple ensemble: average DNN + XGBoost ✅ IMPLEMENTED (see §8 row 9)
 **Evidence:** the two models' error bursts don't fully coincide in the plots (different hours miss differently); their test MAPEs are within 0.3 pp of each other — the classic setup where a 50/50 average beats both.
 **Action:** `pred_ens = 0.5*pred_dnn + 0.5*pred_xgb` on the stored `forecasts` DataFrames — zero retraining needed, one cell. Optionally tune the weight on the *validation* tail only (not test!).
-**Expected impact:** typically 0.1–0.4 pp MAPE improvement for free. Report as a third model row.
+**Expected impact:** typically 0.1–0.4 pp MAPE improvement for free. Reported as a fourth `results_summary` row (`Ensemble`), alongside — not replacing — DNN, XGBoost, and Naive. **Awaiting re-run to record the actual delta.**
 
 ### P4 — Ramp/persistence-error features (targets the systematic lag)
 **Evidence:** the 7-day zoom shows both models trailing fast ramps — over-reliance on `demanda_residual` (importance ~0.29 = persistence anchor).
