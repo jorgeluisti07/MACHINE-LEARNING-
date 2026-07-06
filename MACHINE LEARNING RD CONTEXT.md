@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.1 | DNN + XGBoost | Lagged Approach | Leakage-fixed | Post-fix results confirmed
+**Version:** v26.2 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Ensemble confirmed as best model
 **Companion files:** `MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb`, `MACHINE_LEARNING_RESIDUAL_DEMAND.py`, `README.md` (How to Run)
 
 ---
@@ -210,7 +210,7 @@ The four `*_h24` meteorological features (`irradiance_direct_h24`, `irradiance_d
 | 6 | Hardcoded Renewables.ninja API token in source | Data-download cell | **Not fixed** — flagged to the user, out of scope of the requested changes | ⚠️ Open — rotate the token and move to an env var before any public sharing |
 | 7 | §9 results were stale (pre-leakage-fix) | This doc | Notebook re-run after the fix; post-fix results recorded in §9.1 (DNN 7.02%, XGB 7.31%, MAE ~70 MW), pre-fix kept in §9.2 for comparison. Fix confirmed harmless-to-beneficial for accuracy | ✅ Verified from re-run output |
 | 8 | Error spikes on holiday-adjacent days despite `is_holiday` feature; several near-zero-importance features | Post-fix diagnostics (feature importance T_last=8368, error plots) | Documented as prioritized optimization roadmap (§10, P1–P7) — not yet implemented; implement one at a time and record deltas here | 📋 Roadmap written, pending implementation |
-| 9 | **P3 implemented:** `Ensemble = 0.5·(DNN + XGBoost)` added as a **fourth row** of `results_summary` (DNN/XGBoost/Naive rows unchanged, no retraining — averages the stored test forecasts) | Results-summary block, both `.py` and `.ipynb` | Adversarially reviewed (slices/shapes/leakage all confirmed clean). **Pending: re-run the final cells locally and record the Ensemble MAPE/WAPE/MAE/RMSE delta here** | 🔄 Code in, awaiting re-run numbers |
+| 9 | **P3 implemented and confirmed:** `Ensemble = 0.5·(DNN + XGBoost)` added as a **fourth row** of `results_summary` (DNN/XGBoost/Naive rows unchanged, no retraining — averages the stored test forecasts) | Results-summary block, both `.py` and `.ipynb` | Adversarially reviewed (slices/shapes/leakage all confirmed clean); re-run confirms Ensemble beats both base models on **all four** metrics (MAPE 6.88% vs 7.02%/7.31%; RMSE 95.5 vs 96.6/101.8 MW) — see §9.1 | ✅ Confirmed best model |
 
 **How this file stays useful:** when something in the notebook/script turns out wrong or gets fixed, add a row here rather than just fixing it silently — that's what makes this doc worth reading before starting new work on the pipeline.
 
@@ -218,18 +218,32 @@ The four `*_h24` meteorological features (`irradiance_direct_h24`, `irradiance_d
 
 ## 9. Results
 
-### 9.1 Current results — POST-leakage-fix (v26, confirmed from re-run)
+### 9.1 Current results — POST-leakage-fix + Ensemble (v26.2, confirmed from re-run)
 
-| Model | Test MAPE | Test WAPE | Test sMAPE | R² | MAE (MW) | vs Naive |
-|---|---|---|---|---|---|---|
-| **DNN** | **7.02%** | **0.0611** | **6.58%** | **0.7790** | **69.7** | **39.3%** |
-| XGBoost | 7.31% | 0.0618 | 6.70% | 0.7550 | 70.5 | 36.8% |
-| Naive | 11.57% | 0.1017 | 11.24% | 0.3563 | — | — |
+| Model | MAPE | WAPE | MAE (MW) | RMSE (MW) | vs Naive (MAPE) |
+|---|---|---|---|---|---|
+| DNN | 7.02% | 6.11% | 69.7 | 96.6 | 39.3% |
+| XGBoost | 7.31% | 6.18% | 70.5 | 101.8 | 36.8% |
+| **Ensemble (0.5·DNN + 0.5·XGB)** | **6.88%** | **5.89%** | **67.1** | **95.5** | **40.5%** |
+| Naive | 11.57% | 10.17% | 116.0 | 165.0 | — |
 
 **Test period:** ~2025-11-02 → ~2025-12-30 (58 rolling days). **Training cutoff:** T = 7000; final-iteration cutoff T_last = 8368.
-(RMSE is also computed in the notebook's `results_summary` table — record it here on the next run.
-Naive-row WAPE/sMAPE/R² are carried over from v25: the persistence benchmark is unaffected by the
-hydro fix by construction; only its MAPE 11.57% was visually re-confirmed from the re-run plots.)
+
+**The Ensemble is now the headline model.** It beats both individual models on **every** metric —
+not just MAPE/WAPE (relative) but also MAE **and RMSE** (absolute, in MW). The RMSE improvement
+matters most: RMSE penalizes large misses more than MAE, so an ensemble RMSE below both base
+models' RMSE means it isn't just accurate on typical hours, it is also more robust on the worst
+days — consistent with the "DNN and XGBoost miss on different hours" premise from the P3 roadmap
+entry (§10). This is a clean, defensible result for the thesis: two independently-trained models
+with correlated-but-not-identical errors, and a costless post-hoc average that improves both the
+central tendency and the tail behavior.
+
+*(This run's `results_summary` output only reports MAPE/WAPE/MAE/RMSE — sMAPE and R² are computed
+elsewhere in the notebook, e.g. printed after each model's own metrics section, not in this table.
+The previously-recorded DNN sMAPE 6.58%/R² 0.7790 and XGBoost sMAPE 6.70%/R² 0.7550 came from that
+separate output on the same re-run and should still hold, since DNN/XGBoost were not retrained for
+the ensemble step — only re-confirm them next time those print statements are re-run. Naive-row
+MAE/RMSE are new; Naive MAPE/WAPE match §9.2's pre-fix values by construction, as expected.)
 
 ### 9.2 Historical results — PRE-leakage-fix (v25, keep for comparison, do not cite as current)
 
@@ -256,10 +270,10 @@ Derived from the post-fix diagnostics (XGBoost feature-importance chart at T_las
 **Action:** ablation run with the bottom ~6 features removed (keep the calendar encodings for the DNN — cyclic features matter there even if trees ignore them; consider *separate* feature lists per model).
 **Expected impact:** small accuracy change either way, but a leaner model, faster rolling loop, and a clean "feature ablation" subsection for the thesis. If accuracy holds, keep the pruned set.
 
-### P3 — Simple ensemble: average DNN + XGBoost ✅ IMPLEMENTED (see §8 row 9)
+### P3 — Simple ensemble: average DNN + XGBoost ✅ IMPLEMENTED & CONFIRMED (see §8 row 9, §9.1)
 **Evidence:** the two models' error bursts don't fully coincide in the plots (different hours miss differently); their test MAPEs are within 0.3 pp of each other — the classic setup where a 50/50 average beats both.
-**Action:** `pred_ens = 0.5*pred_dnn + 0.5*pred_xgb` on the stored `forecasts` DataFrames — zero retraining needed, one cell. Optionally tune the weight on the *validation* tail only (not test!).
-**Expected impact:** typically 0.1–0.4 pp MAPE improvement for free. Reported as a fourth `results_summary` row (`Ensemble`), alongside — not replacing — DNN, XGBoost, and Naive. **Awaiting re-run to record the actual delta.**
+**Action:** `pred_ens = 0.5*pred_dnn + 0.5*pred_xgb` on the stored `forecasts` DataFrames — zero retraining needed, one cell.
+**Result:** confirmed on re-run — Ensemble MAPE 6.88% (vs DNN 7.02%, XGB 7.31%), and it also wins on WAPE, MAE, **and RMSE**, so the improvement isn't just average-case, it holds on the worst days too. **This is now the best model; treat it as the baseline for P1/P4 going forward** (i.e. once holiday/ramp features are added, re-run the ensemble on the new DNN+XGB forecasts too, don't just compare the new features against the old single models).
 
 ### P4 — Ramp/persistence-error features (targets the systematic lag)
 **Evidence:** the 7-day zoom shows both models trailing fast ramps — over-reliance on `demanda_residual` (importance ~0.29 = persistence anchor).
