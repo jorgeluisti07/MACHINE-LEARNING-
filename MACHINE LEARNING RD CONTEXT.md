@@ -288,7 +288,7 @@ Keep non-selected/experimental models (e.g. earlier LSTM attempts, alternative f
 
 ## 11. Change Log & Revert Instructions
 
-All changes land as focused git commits on branch `claude/boris-skill-install-cm0y3t`, so any step can be undone independently with `git revert <hash>`.
+All changes land as focused git commits on branch `claude/RDMACHINELEARNING` (renamed from `claude/boris-skill-install-cm0y3t`), so any step can be undone independently with `git revert <hash>`.
 
 | Commit | Contents | To undo |
 |---|---|---|
