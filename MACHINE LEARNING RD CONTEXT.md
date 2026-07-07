@@ -461,12 +461,13 @@ All changes land as focused git commits on branch `claude/RDMACHINELEARNING` (re
 | `71f7120` | This reference doc reorganized v25→v26 (TL;DR, Limitations, Fixes Log) | `git revert 71f7120` |
 | `5d5d745`, `df4a3d9`, `a3b3e95` | **P1 holiday-proximity features** — implemented, review-fixed, results recorded (32 features, DNN worse / XGBoost better / target spikes down 32%/17%) | Already reverted (see next row). To **re-apply** P1: `git revert 782daa3` (undoes the revert) |
 | `782daa3` | **Reverted P1** per user request — restores the exact pre-P1 (v26.7) code and doc state | `git revert 782daa3` to bring P1 back (equivalent to re-applying the three commits above) |
-| `d473e98` | **P5 (XGBoost sweep) + weighted ensemble** — both implemented together in one commit since they share one pipeline run. Result: P5 is a clean win (new best 6.78% MAPE); weighted ensemble is a documented negative result (didn't beat flat 0.5/0.5) | See below — **full vs. partial revert** |
+| `d473e98` | **P5 (XGBoost sweep) + weighted ensemble** — both implemented together in one commit since they share one pipeline run. Result: P5 is a clean win (new best 6.78% MAPE); weighted ensemble is a documented negative result (didn't beat flat 0.5/0.5) | Superseded by `899160f` below — do not revert this one directly, it would also undo the removal's intent |
+| `899160f` | **Removed the weighted-ensemble code per user request**, keeping P5. `results_summary` back to 4 rows (DNN, XGBoost, Ensemble, Naive); P5-tuned XGBoost and the flat Ensemble untouched | `git revert 899160f` to bring the weighted-ensemble code back (re-adds the 5th row and weight search) |
 | *latest on this file* | v26.1+: post-fix results, §10 roadmap, this revert table, plus all rows above | Find it with `git log --oneline -- "MACHINE LEARNING RD CONTEXT.md"`, then `git revert <hash>` |
 
-**Reverting `d473e98` (P5 + weighted ensemble) — two options, since they're one commit but you may only want to undo one:**
-
-- **Revert both:** `git revert d473e98` — one command, clean, restores the exact pre-P5 state (XGBoost back to the original hardcoded hyperparameters, no weighted-ensemble row). Do this if you don't want either change.
-- **Keep P5, drop only the weighted ensemble:** `git revert` operates on whole commits, so this needs a small manual follow-up edit rather than one command — ask me (or a future session) to "remove the weighted-ensemble block, keep the P5 sweep" and I'll delete just that section from both `.py`/`.ipynb` (it's self-contained: one block before `_summary_rows`, plus removing its row from the results dict) and commit that as a new, separate, revertible change. This is the recommended option given the results in §9.2 (P5 = keep, weighted ensemble = keep as documented finding or drop, your call).
+**Current shipped state:** P5 (kept) + flat 0.5/0.5 Ensemble only. To revert **everything from P5
+onward** (back to the pre-P5, pre-P1-revert v26.7/v26.9 state): `git revert 899160f` then
+`git revert d473e98`, in that order. To bring back **just** the weighted ensemble on top of the
+current state: `git revert 899160f` alone.
 
 To reproduce the **pre-fix (v25) numbers** for a thesis comparison table: `git stash && git checkout 698be5f~1 -- MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb`, re-run, then `git checkout HEAD -- MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb && git stash pop`. (Or simply cite §9.2 — the pre-fix numbers are preserved there.)
