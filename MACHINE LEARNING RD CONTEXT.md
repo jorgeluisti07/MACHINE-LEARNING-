@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.5 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Full run executed, overfit gap quantified, roadmap re-prioritized
+**Version:** v26.6 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Panama season dates corrected
 
 > **Standing rule:** the Renewables.ninja download code (geocoding prompt, token, API calls) is
 > owned by the user — **do not modify it** without explicit instruction. See §8 row 10.
@@ -53,13 +53,26 @@
 | Burn-in | First 336 rows dropped | `MAX_LAG = 336 h` (2 weeks) — rows before this have NaN lag features |
 | Training start | ~2025-01-15 01:00 | After `MAX_LAG` burn-in |
 | Training cutoff `T` | Row index 7000 | ≈ 7000 hourly records ≈ 292 days |
-| Training end (approx.) | ~2025-10-31 | Wet season in Panama (Jan–Oct) |
+| Training end (approx.) | ~2025-10-31 | Tail of the dry season (Jan–Apr) + the full wet season (May–Oct) |
 | Test start | `datetime_index.iloc[7000]` | ≈ 2025-11-02 |
-| Test end | ~2025-12-30 | Dry season onset (Nov–Dec) |
+| Test end | ~2025-12-30 | Last month of the wet season (Nov) + onset of the new dry season (Dec) |
 | Test rolling days | ~58 days | `(len(df) − 7000) // 24` |
 | Test hours | ~1392 hours | `n_test_days × 24` |
 
-**Seasonal split note:** training (Jan–Oct) covers the wet season (peak hydro); test (Nov–Dec) covers the start of the dry season (declining hydro, rising thermal). This distributional shift is one reason the XGBoost overfit gap (2.75 pp, pre-fix) was larger than the DNN's (0.79 pp, pre-fix) — see §9 caveat.
+**Panama seasons (corrected — do not use "wet = Jan–Oct" from earlier drafts of this doc):**
+**dry/summer season = December–April**, **rainy/wet season = May–November**.
+
+**Seasonal split note:** training (mid-Jan–Oct) spans the *end* of one dry season plus the *entire*
+wet season that follows — so it is mostly wet-season data, not purely wet season as earlier
+versions of this doc claimed. The test window (Nov 2–Dec 30) is where the actual wet→dry
+**transition happens mid-window**: November is still wet season — climatically similar to most of
+training — and only December falls in the newly-started dry season. This narrows (but doesn't
+remove) the distributional-shift explanation for the XGBoost overfit gap (§9.1): the shift is
+concentrated in the **December portion** of the test set, not spread across the whole 58 days.
+This is also directly relevant to the two documented error-spike dates (§10 P1): **Nov 28** sits in
+the wet season (same regime as training), while **Dec 25** sits in the new dry-season onset —
+worth checking in the per-day error data whether the Dec 25 spike is larger/different in character
+than the Nov 28 one, since one is an in-distribution holiday and the other is not.
 
 ---
 
@@ -227,6 +240,7 @@ bit-reproducibility is ever required, try `tf.config.experimental.enable_op_dete
 | 10 | **Reproducibility pass (v26.3), then partially reverted (v26.4) by user request:** the v26.3 changes (fixed coordinates instead of `input()` geocoding, env-var token, offline cache-load) were **rolled back** — the user needs to enter the location interactively, and the Renewables.ninja download flow is owned by the user and must not be modified. **Kept from the pass:** each run now *exports* the downloaded API data to `renewables_ninja_2025.csv` (traceability of exact weather inputs), `requirements.txt` (geopy included), and the rewritten README/How-to-Run | Data-download cells, both `.py` and `.ipynb`; README; requirements.txt | Original API flow restored verbatim from commit `40276c1` + one export line added after the combine step | ✅ Settled — do not touch the Renewables.ninja download code again without explicit instruction |
 | 11 | Stale EDA comments claimed `demanda_residual`→target correlation "r ≈ 0.3–0.4"; the actual plot shows **r = 0.685** | ACF/scatter markdown + correlation-matrix comments, both files | Corrected to r ≈ 0.69 ("strongest single predictor") — consistent with `demanda_residual` also being XGBoost's #1 feature (gain ≈ 0.24–0.29) | ✅ Fixed from run evidence (photos) |
 | 12 | Pipeline had never actually been executed end-to-end in this environment against the user's real weather data — all prior numbers came from the user's own local runs (photos/typed results) | N/A — this is a "did we ever check" item, not a code fix | Ran the full `.py` pipeline (data load → both rolling loops → results table) directly against the user-supplied `renewables_ninja_2025.csv`, in an isolated scratch copy (repo untouched). Confirmed the pipeline executes cleanly end-to-end and reproduces the user's own numbers within expected run-to-run variance (§7.3). Quantified the XGBoost/DNN overfit gap directly from the run output, which reshaped §10's priority order (P5 promoted to top) | ✅ Executed and recorded — see §9.1 |
+| 13 | Doc incorrectly stated Panama's wet season as "Jan–Oct" and dry season as "Nov–Dec onset" | §3 Training/Test Dates, §9.1 seasonal-shift explanation, §10 P1, README limitations | **Corrected per user:** dry/summer season = **Dec–Apr**, rainy/wet season = **May–Nov**. This means training (mid-Jan–Oct) is mostly wet season (not purely as before), and the wet→dry transition happens **mid-way through the test window** (Nov = wet, Dec = new dry onset), not before it. Narrows the distributional-shift story to the December portion of test, and flags a possible confound between the Nov 28 (in-season) vs Dec 25 (new-season) error spikes in P1 | ✅ Corrected per direct user input |
 
 **How this file stays useful:** when something in the notebook/script turns out wrong or gets fixed, add a row here rather than just fixing it silently — that's what makes this doc worth reading before starting new work on the pipeline.
 
@@ -280,8 +294,9 @@ Derived from the post-fix diagnostics (XGBoost feature-importance chart at T_las
 
 ### P1 — Holiday-proximity features (targets the two biggest error events)
 **Evidence:** the two largest error spikes (~480 MW, ~7× the 69.7 MW MAE) occur around Nov 26–28 and Dec 22–25 — both adjacent to national holidays (Nov 28, Dec 25) — yet `is_holiday` has near-zero XGBoost gain. A same-day binary flag can't capture bridge days, eves, or the demand ramp-down before/after a holiday.
+**Confound to check (from the season correction, §3):** Nov 28 falls in the wet season (same regime as most of training), while Dec 25 falls in the newly-started dry season (a regime training barely saw). So the Dec 25 spike may be partly a **seasonal-shift** error, not purely a holiday error — worth checking the two spikes' error magnitude/shape separately before attributing both entirely to the holiday effect.
 **Action:** add `days_to_next_holiday` and `days_since_last_holiday` (clipped to e.g. ±3), and/or `is_holiday_adjacent`. Cheap, leakage-free (the holiday calendar is known in advance — genuinely available at forecast time).
-**Expected impact:** directly attacks the tail errors that dominate RMSE; may not move MAPE much but should cut the worst days.
+**Expected impact:** directly attacks the tail errors that dominate RMSE; may not move MAPE much but should cut the worst days. Given the confound above, expect a cleaner win on the Nov 28 spike than the Dec 25 one.
 
 ### P2 — Prune dead features (simplify + reduce variance)
 **Evidence:** bottom of the importance chart: `hidro_mw`, `is_holiday`, `hidro_fraction_L24`, `hidro_anomaly_L24`, `residual_L48`, `temperature`, `irradiance_diffuse`, `eolica_mw` all contribute < ~0.01 gain each. Also `hour`/`hour_sin`/`hour_cos` triple-encode the same signal for XGBoost.

@@ -83,9 +83,11 @@ is the intended entry point.
   `hidro_anomaly_L24`) are rebuilt inside each rolling window from **training-only data**
   (`rebuild_hidro_profile_features`), so no window sees a `(month, hour)` hydro average that
   includes months past its own cutoff.
-- **Seasonal train/test shift.** Training covers Jan–Oct (wet season, peak hydro); the test window
-  Nov–Dec is the dry-season onset. Part of the test error reflects this distribution shift, which
-  is realistic for deployment but worth keeping in mind when reading the metrics.
+- **Seasonal train/test shift.** Panama's seasons are dry/summer (Dec–Apr) and rainy/wet (May–Nov).
+  Training (mid-Jan–Oct) is mostly wet season; the test window (Nov 2–Dec 30) straddles the
+  transition — November is still wet season, December is the new dry season's onset. Part of the
+  test error, concentrated in the December portion, reflects this distribution shift, which is
+  realistic for deployment but worth keeping in mind when reading the metrics.
 - **Run-to-run variability.** Seeds are fixed (`set_random_seeds(42)` per rolling iteration), but
   TensorFlow op-level nondeterminism can still move DNN metrics by ≈ ±0.05 pp MAPE between runs —
   cite results from one named run. The exported weather CSV records the exact MERRA-2 inputs used.
