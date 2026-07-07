@@ -1080,6 +1080,69 @@ subprocess.check_call(['pip', 'install', 'xgboost', '-q'], stdout=subprocess.DEV
 from xgboost import XGBRegressor
 # XGBRegressor: the scikit-learn compatible XGBoost regression interface.
 
+# ────────────────────────────────────────────────────────────────────────────
+# XGBoost hyperparameter sweep (roadmap P5)
+# A direct run (v26.5) measured XGBoost's overfit gap at 2.82 pp — ~4x the DNN's 0.73 pp —
+# at nearly the same test MAPE, meaning the original config (max_depth=5, reg_alpha=0.1,
+# reg_lambda=1.0) fits training data harder than it needs to. This sweep searches a small
+# grid using ONLY the FIRST rolling window's (T, not T_last) internal validation split — the
+# tail of the ORIGINAL training window, entirely BEFORE row T where the test period starts.
+# T_last's own training window was deliberately avoided here: because of the expanding-window
+# design, T_last's "training" rows extend deep into calendar dates that are later reported as
+# test-period performance, so tuning against T_last's validation slice would let the sweep's
+# hyperparameter choice be informed by actual outcomes on some of the very dates later graded
+# in the results table — a soft look-ahead leak into model selection, not into the forecasts
+# themselves. Using T's validation slice (rows entirely before the test window starts)
+# guarantees zero date overlap with anything reported. The winning config is then used, fixed,
+# for every iteration of the rolling loop below (same protocol as the original hardcoded
+# config, just re-tuned).
+# ────────────────────────────────────────────────────────────────────────────
+
+_Y_sweep, _X_sweep, _ = get_targets_features(df_in=df, T=T, scale=False)
+_val_size_sweep = max(24, round(len(_X_sweep) * 0.10))
+_X_val_sweep = _X_sweep.iloc[-_val_size_sweep:]
+_y_val_sweep = _Y_sweep.values.ravel()[-_val_size_sweep:]
+_X_tr_sweep  = _X_sweep.iloc[:-_val_size_sweep]
+_y_tr_sweep  = _Y_sweep.values.ravel()[:-_val_size_sweep]
+
+XGB_PARAM_GRID = [
+    # (max_depth, min_child_weight, reg_alpha, reg_lambda, subsample, colsample_bytree)
+    (5, 1,  0.1, 1.0, 0.8, 0.8),   # original config — the baseline this sweep must beat
+    (4, 1,  0.1, 1.0, 0.8, 0.8),
+    (4, 5,  0.3, 2.0, 0.8, 0.8),
+    (4, 5,  0.3, 2.0, 0.7, 0.7),
+    (3, 5,  0.3, 2.0, 0.7, 0.7),
+    (4, 10, 0.5, 3.0, 0.7, 0.7),
+]
+
+_sweep_rows = []
+for _md, _mcw, _ra, _rl, _ss, _cs in XGB_PARAM_GRID:
+    _m = XGBRegressor(
+        n_estimators=500, learning_rate=0.03, max_depth=_md, min_child_weight=_mcw,
+        subsample=_ss, colsample_bytree=_cs, reg_alpha=_ra, reg_lambda=_rl,
+        early_stopping_rounds=20, random_state=42, verbosity=0, n_jobs=-1,
+    )
+    _m.fit(_X_tr_sweep, _y_tr_sweep, eval_set=[(_X_val_sweep, _y_val_sweep)], verbose=False)
+    _val_mape   = mean_absolute_percentage_error(_y_val_sweep, _m.predict(_X_val_sweep)) * 100
+    _train_mape = mean_absolute_percentage_error(_y_tr_sweep, _m.predict(_X_tr_sweep)) * 100
+    _sweep_rows.append({
+        'max_depth': _md, 'min_child_weight': _mcw, 'reg_alpha': _ra, 'reg_lambda': _rl,
+        'subsample': _ss, 'colsample_bytree': _cs,
+        'val_mape': _val_mape, 'train_mape': _train_mape, 'gap': _val_mape - _train_mape,
+    })
+
+_sweep_df = pd.DataFrame(_sweep_rows).sort_values('val_mape').reset_index(drop=True)
+print('XGBoost hyperparameter sweep (validation-only, T window — before the test period, untouched):')
+print(_sweep_df.round(3).to_string())
+
+_best_row = _sweep_df.iloc[0]
+XGB_PARAMS = dict(
+    max_depth=int(_best_row['max_depth']), min_child_weight=int(_best_row['min_child_weight']),
+    reg_alpha=float(_best_row['reg_alpha']), reg_lambda=float(_best_row['reg_lambda']),
+    subsample=float(_best_row['subsample']), colsample_bytree=float(_best_row['colsample_bytree']),
+)
+print(f'\nSelected XGBoost config (lowest validation MAPE): {XGB_PARAMS}')
+
 for day_idx in tqdm(range(n_test_days), desc='XGBoost rolling h=24'):
 
     T_day = T + day_idx * HORIZON
@@ -1108,11 +1171,8 @@ for day_idx in tqdm(range(n_test_days), desc='XGBoost rolling h=24'):
     model_xgb = XGBRegressor(
         n_estimators=500,       # maximum number of boosting rounds (trees)
         learning_rate=0.03,     # shrinkage per round — smaller = more robust
-        max_depth=5,            # maximum tree depth — controls model complexity
-        subsample=0.8,          # fraction of training rows per tree (row subsampling)
-        colsample_bytree=0.8,   # fraction of features per tree (column subsampling)
-        reg_alpha=0.1,          # L1 regularisation on leaf weights
-        reg_lambda=1.0,         # L2 regularisation on leaf weights
+        **XGB_PARAMS,           # max_depth, min_child_weight, reg_alpha, reg_lambda,
+                                 # subsample, colsample_bytree — chosen by the P5 sweep above
         early_stopping_rounds=20,  # CONSTRUCTOR (XGBoost ≥ 2.0 requirement)
         # Stop if validation metric has not improved for 20 consecutive rounds.
         random_state=42,        # random seed for reproducibility
@@ -1387,10 +1447,63 @@ _pred_xgb = forecasts['xgboost'][target_h24].iloc[T:T + n_test_hours].values.ast
 # averaging tends to cancel part of each model's error.
 _pred_ens = 0.5 * (_pred_dnn + _pred_xgb)
 
+# ────────────────────────────────────────────────────────────────────────────
+# Weighted ensemble (roadmap: weighted-ensemble refinement of P3)
+# The flat 0.5/0.5 ensemble above treats both models equally. Here the weight is chosen by
+# searching for the w that minimises VALIDATION WAPE — using the FIRST rolling iteration's
+# models (T, not T_last) predicting on their own held-out validation slice (the tail of the
+# ORIGINAL training window, entirely before row T where the test period starts). T_last's
+# training window was deliberately avoided: its rows extend deep into calendar dates that are
+# later reported as test-period performance (an expanding-window artifact), so tuning against
+# T_last's validation slice would let the weight choice be informed by actual outcomes on some
+# of the very dates later graded in the results table — leakage into model selection, even
+# though the forecasts themselves stay leakage-free either way. Using T's validation slice
+# guarantees zero date overlap with the reported 58-day test period.
+# ────────────────────────────────────────────────────────────────────────────
+
+_X_train_dnn_first = globals()['X_train_dnn' + str(T)]
+_scaler_y_first     = globals()['scaler_y_dnn' + str(T)]
+_model_dnn_first    = globals()['model_dnn'    + str(T)]
+_model_xgb_first    = globals()['model_xgb'    + str(T)]
+_X_train_xgb_first  = globals()['X_train_xgb'  + str(T)]
+
+_val_size_w = max(24, round(len(_X_train_xgb_first) * 0.10))
+# Same val_size formula as both rolling loops, applied to the first (T) window only.
+
+_X_val_dnn_w    = _X_train_dnn_first.iloc[-_val_size_w:]
+_X_val_xgb_w    = _X_train_xgb_first.iloc[-_val_size_w:]
+_y_val_actual_w = df[target_h24].iloc[T - _val_size_w:T].values
+# df's row order is the same trimmed, reset-index dataframe every get_targets_features() call
+# slices from, so this range lines up with X_train_*_first.iloc[-_val_size_w:] row-for-row.
+# T - _val_size_w : T is entirely < T, i.e. strictly before the test period starts at row T.
+
+_pred_val_dnn = _scaler_y_first.inverse_transform(
+    _model_dnn_first.predict(_X_val_dnn_w, verbose=0)
+).ravel()
+_pred_val_xgb = _model_xgb_first.predict(_X_val_xgb_w)
+
+_weights = np.arange(0.0, 1.01, 0.05)
+_val_wape_by_w = [
+    np.sum(np.abs(_y_val_actual_w - (w * _pred_val_dnn + (1 - w) * _pred_val_xgb)))
+    / (np.sum(np.abs(_y_val_actual_w)) + 1e-8)
+    for w in _weights
+]
+BEST_ENSEMBLE_WEIGHT = float(_weights[int(np.argmin(_val_wape_by_w))])
+# w = weight on the DNN; (1 - w) on XGBoost.
+
+print('Ensemble weight search (validation WAPE, T window — before the test period, w = DNN weight):')
+for w, wape in zip(_weights, _val_wape_by_w):
+    marker = '  <-- selected' if abs(w - BEST_ENSEMBLE_WEIGHT) < 1e-9 else ''
+    print(f'  w={w:.2f}: val WAPE={wape:.4f}{marker}')
+print(f'Selected weight: w={BEST_ENSEMBLE_WEIGHT:.2f} (DNN) / {1 - BEST_ENSEMBLE_WEIGHT:.2f} (XGBoost)')
+
+_pred_ens_weighted = BEST_ENSEMBLE_WEIGHT * _pred_dnn + (1 - BEST_ENSEMBLE_WEIGHT) * _pred_xgb
+
 _summary_rows = {
     'DNN':      _pred_dnn,
     'XGBoost':  _pred_xgb,
-    'Ensemble': _pred_ens,
+    'Ensemble (0.5/0.5)': _pred_ens,
+    f'Weighted Ensemble (w={BEST_ENSEMBLE_WEIGHT:.2f})': _pred_ens_weighted,
     'Naive':    naive_preds.astype(float),
 }
 
