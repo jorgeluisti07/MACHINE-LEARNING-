@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.4 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Original API flow restored + weather export
+**Version:** v26.5 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Full run executed, overfit gap quantified, roadmap re-prioritized
 
 > **Standing rule:** the Renewables.ninja download code (geocoding prompt, token, API calls) is
 > owned by the user — **do not modify it** without explicit instruction. See §8 row 10.
@@ -226,6 +226,7 @@ bit-reproducibility is ever required, try `tf.config.experimental.enable_op_dete
 | 9 | **P3 implemented and confirmed:** `Ensemble = 0.5·(DNN + XGBoost)` added as a **fourth row** of `results_summary` (DNN/XGBoost/Naive rows unchanged, no retraining — averages the stored test forecasts) | Results-summary block, both `.py` and `.ipynb` | Adversarially reviewed (slices/shapes/leakage all confirmed clean); re-run confirms Ensemble beats both base models on **all four** metrics (MAPE 6.88% vs 7.02%/7.31%; RMSE 95.5 vs 96.6/101.8 MW) — see §9.1 | ✅ Confirmed best model |
 | 10 | **Reproducibility pass (v26.3), then partially reverted (v26.4) by user request:** the v26.3 changes (fixed coordinates instead of `input()` geocoding, env-var token, offline cache-load) were **rolled back** — the user needs to enter the location interactively, and the Renewables.ninja download flow is owned by the user and must not be modified. **Kept from the pass:** each run now *exports* the downloaded API data to `renewables_ninja_2025.csv` (traceability of exact weather inputs), `requirements.txt` (geopy included), and the rewritten README/How-to-Run | Data-download cells, both `.py` and `.ipynb`; README; requirements.txt | Original API flow restored verbatim from commit `40276c1` + one export line added after the combine step | ✅ Settled — do not touch the Renewables.ninja download code again without explicit instruction |
 | 11 | Stale EDA comments claimed `demanda_residual`→target correlation "r ≈ 0.3–0.4"; the actual plot shows **r = 0.685** | ACF/scatter markdown + correlation-matrix comments, both files | Corrected to r ≈ 0.69 ("strongest single predictor") — consistent with `demanda_residual` also being XGBoost's #1 feature (gain ≈ 0.24–0.29) | ✅ Fixed from run evidence (photos) |
+| 12 | Pipeline had never actually been executed end-to-end in this environment against the user's real weather data — all prior numbers came from the user's own local runs (photos/typed results) | N/A — this is a "did we ever check" item, not a code fix | Ran the full `.py` pipeline (data load → both rolling loops → results table) directly against the user-supplied `renewables_ninja_2025.csv`, in an isolated scratch copy (repo untouched). Confirmed the pipeline executes cleanly end-to-end and reproduces the user's own numbers within expected run-to-run variance (§7.3). Quantified the XGBoost/DNN overfit gap directly from the run output, which reshaped §10's priority order (P5 promoted to top) | ✅ Executed and recorded — see §9.1 |
 
 **How this file stays useful:** when something in the notebook/script turns out wrong or gets fixed, add a row here rather than just fixing it silently — that's what makes this doc worth reading before starting new work on the pipeline.
 
@@ -233,32 +234,34 @@ bit-reproducibility is ever required, try `tf.config.experimental.enable_op_dete
 
 ## 9. Results
 
-### 9.1 Current results — POST-leakage-fix + Ensemble (v26.2, confirmed from re-run)
+### 9.1 Current results — POST-leakage-fix + Ensemble (v26.5)
 
-| Model | MAPE | WAPE | MAE (MW) | RMSE (MW) | vs Naive (MAPE) |
-|---|---|---|---|---|---|
-| DNN | 7.02% | 6.11% | 69.7 | 96.6 | 39.3% |
-| XGBoost | 7.31% | 6.18% | 70.5 | 101.8 | 36.8% |
-| **Ensemble (0.5·DNN + 0.5·XGB)** | **6.88%** | **5.89%** | **67.1** | **95.5** | **40.5%** |
-| Naive | 11.57% | 10.17% | 116.0 | 165.0 | — |
+| Model | MAPE | WAPE | sMAPE | R² | MAE (MW) | RMSE (MW) | Train MAPE | Overfit gap |
+|---|---|---|---|---|---|---|---|---|
+| DNN | 7.01% | 6.11% | 6.57% | 0.7791 | 69.7 | 96.6 | 6.28% | **0.73 pp** |
+| XGBoost | 7.35% | 6.20% | 6.73% | 0.7525 | 70.7 | 102.3 | 4.54% | **2.82 pp** |
+| **Ensemble (0.5·DNN + 0.5·XGB)** | **6.89%** | **5.88%** | — | — | **67.1** | **95.6** | — | — |
+| Naive | 11.57% | 10.17% | 11.24% | 0.3563 | 116.0 | 165.0 | — | — |
 
 **Test period:** ~2025-11-02 → ~2025-12-30 (58 rolling days). **Training cutoff:** T = 7000; final-iteration cutoff T_last = 8368.
+**Provenance:** this is a full end-to-end execution of the pipeline (data → both rolling loops →
+results table), run against the user's own `renewables_ninja_2025.csv`. It reproduces the same
+run the user reported by hand (DNN 7.02%, XGB 7.31%, Ensemble 6.88%) within the ±0.05 pp band
+already documented in §7.3 as expected TensorFlow op-level nondeterminism — treat this table as
+the current numbers, superseding the previous entry (DNN sMAPE/R² there are now filled in directly
+from this run instead of carried over from a prior one).
 
-**The Ensemble is now the headline model.** It beats both individual models on **every** metric —
-not just MAPE/WAPE (relative) but also MAE **and RMSE** (absolute, in MW). The RMSE improvement
-matters most: RMSE penalizes large misses more than MAE, so an ensemble RMSE below both base
-models' RMSE means it isn't just accurate on typical hours, it is also more robust on the worst
-days — consistent with the "DNN and XGBoost miss on different hours" premise from the P3 roadmap
-entry (§10). This is a clean, defensible result for the thesis: two independently-trained models
-with correlated-but-not-identical errors, and a costless post-hoc average that improves both the
-central tendency and the tail behavior.
+**The Ensemble is the headline model.** It beats both individual models on **every** metric —
+not just MAPE/WAPE (relative) but also MAE **and RMSE** (absolute, in MW), meaning it's not just
+better on average, it's also more robust on the worst days (RMSE penalizes large misses more).
 
-*(This run's `results_summary` output only reports MAPE/WAPE/MAE/RMSE — sMAPE and R² are computed
-elsewhere in the notebook, e.g. printed after each model's own metrics section, not in this table.
-The previously-recorded DNN sMAPE 6.58%/R² 0.7790 and XGBoost sMAPE 6.70%/R² 0.7550 came from that
-separate output on the same re-run and should still hold, since DNN/XGBoost were not retrained for
-the ensemble step — only re-confirm them next time those print statements are re-run. Naive-row
-MAE/RMSE are new; Naive MAPE/WAPE match §9.2's pre-fix values by construction, as expected.)
+**New evidence from this run — the overfit gap, quantified:** XGBoost's overfit gap (train 4.54%
+→ test 7.35%, **2.82 pp**) is essentially **4× the DNN's** (train 6.28% → test 7.01%, **0.73 pp**).
+Both models land at nearly the same *test* MAPE, but XGBoost gets there by fitting the training
+data much harder and generalizing worse — direct, measured confirmation of what §3's seasonal-
+split note already predicted (wet-season training vs dry-season test). **This reframes the
+optimization roadmap: XGBoost has headroom to close via regularization, not just feature
+engineering — see §10's re-prioritization below.**
 
 ### 9.2 Historical results — PRE-leakage-fix (v25, keep for comparison, do not cite as current)
 
@@ -285,20 +288,48 @@ Derived from the post-fix diagnostics (XGBoost feature-importance chart at T_las
 **Action:** ablation run with the bottom ~6 features removed (keep the calendar encodings for the DNN — cyclic features matter there even if trees ignore them; consider *separate* feature lists per model).
 **Expected impact:** small accuracy change either way, but a leaner model, faster rolling loop, and a clean "feature ablation" subsection for the thesis. If accuracy holds, keep the pruned set.
 
-### P3 — Simple ensemble: average DNN + XGBoost ✅ IMPLEMENTED & CONFIRMED (see §8 row 9, §9.1)
+### Recommended order after the v26.5 run (read this first)
+
+The full run confirmed one thing that changes the priority order: **XGBoost's overfit gap (2.82 pp)
+is ~4× the DNN's (0.73 pp), while their test MAPEs are almost identical (7.35% vs 7.01%).** That is
+the single most actionable fact in this roadmap — XGBoost has real headroom that's cheap to try to
+recover, before reaching for new features at all. Updated order:
+
+1. **P5 (XGBoost regularization sweep)** — promoted to first. The 2.82 pp gap is now a *measured*
+   target, not a guess. If XGBoost's test MAPE improves even slightly while the gap narrows, the
+   ensemble (which currently drags XGBoost's weaker generalization into a flat 50/50 average)
+   improves for free too.
+2. **Weighted ensemble (new, minor extension of P3)** — trivial to try alongside P5: since DNN
+   generalizes better, an ensemble weight favoring DNN (e.g. 0.6·DNN + 0.4·XGB, tuned only on the
+   validation tail, never on test) may beat the current flat 50/50. Almost zero cost — same stored
+   forecasts, just a different scalar.
+3. **P1 (holiday-proximity features)** — still the best lever for the *tail* errors specifically
+   (the ~480 MW spike days), which neither P5 nor re-weighting addresses. Do this once the
+   regularization/weighting quick wins are banked, so its effect is measured on a cleaner baseline.
+4. **P2 (feature pruning)** — do after P5, not before: a regularization sweep may already reduce
+   XGBoost's effective reliance on the near-zero-importance features, so pruning them explicitly
+   afterward is a cleaner ablation with less confounding.
+5. Everything else (P4 ramp features, P6 quantile/Huber loss, P7 pipeline cleanup) unchanged —
+   still lower priority than the four above.
+
+**Discipline reminder (unchanged from before):** one change at a time, re-run, record the delta in
+§8 before moving to the next item. Do not batch P5 and P1 into one run — you won't be able to tell
+which one moved the number.
+
+### P3 — Simple ensemble: average DNN + XGBoost ✅ IMPLEMENTED & CONFIRMED TWICE (see §8 row 9, §9.1)
 **Evidence:** the two models' error bursts don't fully coincide in the plots (different hours miss differently); their test MAPEs are within 0.3 pp of each other — the classic setup where a 50/50 average beats both.
 **Action:** `pred_ens = 0.5*pred_dnn + 0.5*pred_xgb` on the stored `forecasts` DataFrames — zero retraining needed, one cell.
-**Result:** confirmed on re-run — Ensemble MAPE 6.88% (vs DNN 7.02%, XGB 7.31%), and it also wins on WAPE, MAE, **and RMSE**, so the improvement isn't just average-case, it holds on the worst days too. **This is now the best model; treat it as the baseline for P1/P4 going forward** (i.e. once holiday/ramp features are added, re-run the ensemble on the new DNN+XGB forecasts too, don't just compare the new features against the old single models).
+**Result:** confirmed on two separate runs — Ensemble MAPE 6.88–6.89% (vs DNN 7.01–7.02%, XGB 7.31–7.35%), winning on WAPE, MAE, **and RMSE** both times, so the improvement isn't just average-case, it holds on the worst days too. **This is the best model; treat it as the baseline for P1/P4 going forward** (i.e. once holiday/ramp features are added, re-run the ensemble on the new DNN+XGB forecasts too, don't just compare the new features against the old single models). **Next refinement:** try a non-50/50 weight (see recommended order above) — the DNN's much smaller overfit gap suggests it may deserve more than half the weight.
 
 ### P4 — Ramp/persistence-error features (targets the systematic lag)
 **Evidence:** the 7-day zoom shows both models trailing fast ramps — over-reliance on `demanda_residual` (importance ~0.29 = persistence anchor).
 **Action:** add `residual_delta_3h = residual(t) − residual(t−3)` and yesterday's persistence error `naive_error_L24 = residual(t−24) − residual(t−48)`-style features (all backward-looking → leakage-free).
 **Expected impact:** helps the model anticipate ramps instead of following them one step late.
 
-### P5 — XGBoost hyperparameter sweep (close the 0.3 pp gap to the DNN)
-**Evidence:** XGB overfit gap (2.75 pp pre-fix) is much larger than the DNN's (0.79 pp) — under-regularized for the seasonal shift into the dry-season test period.
-**Action:** small grid around the current config on the *validation* tail: `max_depth ∈ {4,5,6}`, `learning_rate ∈ {0.02,0.03,0.05}`, `min_child_weight ∈ {1,5,10}`, `subsample/colsample ∈ {0.7,0.8,0.9}`. Never tune on the test window.
-**Expected impact:** modest; mainly reduces the train/test gap.
+### P5 — XGBoost hyperparameter sweep ⭐ PROMOTED TO TOP PRIORITY (see recommended order above)
+**Evidence:** confirmed by direct execution (v26.5, §9.1) — XGBoost overfit gap is **2.82 pp** (train 4.54% → test 7.35%), vs the DNN's **0.73 pp** (train 6.28% → test 7.01%). Nearly identical test MAPE, very different generalization — XGBoost is fitting training noise the DNN isn't. This is a measured, not assumed, target.
+**Action:** small grid around the current config on the *validation* tail only: `max_depth ∈ {4,5,6}` (lower = less overfit), `learning_rate ∈ {0.02,0.03,0.05}`, `min_child_weight ∈ {1,5,10}` (higher = more conservative splits), `reg_alpha`/`reg_lambda` a notch higher than the current 0.1/1.0, `subsample`/`colsample_bytree ∈ {0.7,0.8,0.9}`. Never tune on the test window — that would leak the test set into model selection.
+**Expected impact:** closing even half the gap (2.82 → ~1.4 pp) without hurting test MAPE would be a genuine, cheap win — and it directly strengthens the ensemble too, since a less-overfit XGBoost is a better ensemble partner for the already-strong DNN.
 
 ### P6 — Quantile/pinball or Huber loss (robustness to spike days)
 **Evidence:** the error distribution is spiky (a few ~400–500 MW days vs 70 MW MAE) — squared-error training over-weights those days at the expense of typical days.
