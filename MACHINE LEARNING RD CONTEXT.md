@@ -1,6 +1,9 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.3 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Reproducibility pass applied
+**Version:** v26.4 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Original API flow restored + weather export
+
+> **Standing rule:** the Renewables.ninja download code (geocoding prompt, token, API calls) is
+> owned by the user — **do not modify it** without explicit instruction. See §8 row 10.
 **Companion files:** `MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb`, `MACHINE_LEARNING_RESIDUAL_DEMAND.py`, `README.md` (How to Run)
 
 ---
@@ -20,8 +23,8 @@
 
 | Source | Description | Format |
 |---|---|---|
-| Renewables.ninja API | Solar/wind resource data for Coclé, Penonomé, Panama (lat=8.52, lon=-80.36 — fixed constants in code). MERRA-2 reanalysis. 859 MW solar / 336 MW wind. Full year 2025. Token via `RENEWABLES_NINJA_TOKEN` env var, needed on first run only. | REST API → JSON |
-| `renewables_ninja_2025.csv` | Local cache of the API response, written on first run; later runs load it and work fully offline (delete to force re-download). | CSV (generated) |
+| Renewables.ninja API | Solar/wind resource data for Coclé, Penonomé, Panama (lat=8.52, lon=-80.36). MERRA-2 reanalysis. 859 MW solar / 336 MW wind. Full year 2025. Location entered interactively at run time (geopy geocoding); token set in the data-download cell. | REST API → JSON |
+| `renewables_ninja_2025.csv` | Export of the downloaded API data (all six meteorological columns), written by each run so the exact weather inputs behind a result are preserved. | CSV (generated) |
 | `solar_eolica_hidro_horario_2025.csv` | Real ETESA metered generation: `solar_mw_real`, `eolica_mw_real`, `hidro_mw_real`. Hourly, 2025. | **CSV** |
 | `DEM2025.csv` | Real ETESA hourly electricity demand 2025. Wide format (date × 24 hours, columns `H1`..`H24`). | **CSV** |
 
@@ -203,7 +206,8 @@ runs have been observed (DNN MAPE 7.02% vs 7.08% across two runs, ≈ ±0.05 pp;
 — consistent with TensorFlow op-level nondeterminism, which seeding alone does not eliminate.
 **Rule: cite results from one named run, never mix numbers across runs.** If exact
 bit-reproducibility is ever required, try `tf.config.experimental.enable_op_determinism()`
-(slower training). The data side is fully deterministic once the weather cache exists (§8 row 10).
+(slower training). On the data side, each run exports the downloaded weather to
+`renewables_ninja_2025.csv`, so the exact MERRA-2 inputs behind a result are always on disk.
 
 ---
 
@@ -216,11 +220,11 @@ bit-reproducibility is ever required, try `tf.config.experimental.enable_op_dete
 | 3 | Hydro seasonal baseline (`hidro_typical_h24`, `hidro_anomaly_L24`) computed once on the full year before the rolling loop — look-ahead leak into early windows | `get_targets_features` / hydro feature block | Added `rebuild_hidro_profile_features(df_in, T)`, refit per-window on training-only rows; called first thing inside `get_targets_features` | ✅ Fixed, unit-tested (3/3 tests pass: no leakage, no NaN, correct fallback), reviewed by an adversarial subagent pass — no findings |
 | 4 | Results only reported percentage error (MAPE/WAPE); no absolute-MW magnitude | End-of-notebook results section | Added `results_summary` table: MAPE %, WAPE %, MAE MW, RMSE MW per model (DNN/XGBoost/Naive) | ✅ Added, dry-run verified |
 | 5 | Excessive line-by-line "what it does" comments in core pipeline cells (imports, feature extraction) | Throughout `.py`/`.ipynb` | Trimmed to docstrings, section headers, and "why" comments only | ✅ Done |
-| 6 | Hardcoded Renewables.ninja API token in source | Data-download cell | Token now read from the `RENEWABLES_NINJA_TOKEN` env var — no secret in source. **The old token is still in git history**, so it must still be rotated at renewables.ninja | ⚠️ Half-closed — code fixed; **rotate the exposed token** (user action) |
+| 6 | Hardcoded Renewables.ninja API token in source | Data-download cell | Briefly moved to an env var (v26.3), then **restored to in-cell by user request** (v26.4) — the user manages the token in the download cell directly. Token is in the repo and its git history | ⚠️ Open — **rotate the token** at renewables.ninja before any public sharing (user action) |
 | 7 | §9 results were stale (pre-leakage-fix) | This doc | Notebook re-run after the fix; post-fix results recorded in §9.1 (DNN 7.02%, XGB 7.31%, MAE ~70 MW), pre-fix kept in §9.2 for comparison. Fix confirmed harmless-to-beneficial for accuracy | ✅ Verified from re-run output |
 | 8 | Error spikes on holiday-adjacent days despite `is_holiday` feature; several near-zero-importance features | Post-fix diagnostics (feature importance T_last=8368, error plots) | Documented as prioritized optimization roadmap (§10, P1–P7) — not yet implemented; implement one at a time and record deltas here | 📋 Roadmap written, pending implementation |
 | 9 | **P3 implemented and confirmed:** `Ensemble = 0.5·(DNN + XGBoost)` added as a **fourth row** of `results_summary` (DNN/XGBoost/Naive rows unchanged, no retraining — averages the stored test forecasts) | Results-summary block, both `.py` and `.ipynb` | Adversarially reviewed (slices/shapes/leakage all confirmed clean); re-run confirms Ensemble beats both base models on **all four** metrics (MAPE 6.88% vs 7.02%/7.31%; RMSE 95.5 vs 96.6/101.8 MW) — see §9.1 | ✅ Confirmed best model |
-| 10 | **Reproducibility pass:** (a) interactive `input()` geocoding via geopy/Nominatim blocked unattended runs — replaced with fixed constants `lat, lon = 8.52, -80.36`; (b) API data re-downloaded every run — first run now caches to `renewables_ninja_2025.csv`, later runs load it fully offline; (c) no pinned dependency list — added `requirements.txt` (geopy dropped); (d) README/How-to-Run rewritten around the new flow; `.py` now runs non-interactively | Data-download cells, both `.py` and `.ipynb`; README; notebook How-to-Run cell | All four applied; syntax-validated. **Note:** re-run cannot be verified in this environment (no API access) — first local run should confirm the cache write/read round-trip | ✅ Code in; verify on next local run |
+| 10 | **Reproducibility pass (v26.3), then partially reverted (v26.4) by user request:** the v26.3 changes (fixed coordinates instead of `input()` geocoding, env-var token, offline cache-load) were **rolled back** — the user needs to enter the location interactively, and the Renewables.ninja download flow is owned by the user and must not be modified. **Kept from the pass:** each run now *exports* the downloaded API data to `renewables_ninja_2025.csv` (traceability of exact weather inputs), `requirements.txt` (geopy included), and the rewritten README/How-to-Run | Data-download cells, both `.py` and `.ipynb`; README; requirements.txt | Original API flow restored verbatim from commit `40276c1` + one export line added after the combine step | ✅ Settled — do not touch the Renewables.ninja download code again without explicit instruction |
 | 11 | Stale EDA comments claimed `demanda_residual`→target correlation "r ≈ 0.3–0.4"; the actual plot shows **r = 0.685** | ACF/scatter markdown + correlation-matrix comments, both files | Corrected to r ≈ 0.69 ("strongest single predictor") — consistent with `demanda_residual` also being XGBoost's #1 feature (gain ≈ 0.24–0.29) | ✅ Fixed from run evidence (photos) |
 
 **How this file stays useful:** when something in the notebook/script turns out wrong or gets fixed, add a row here rather than just fixing it silently — that's what makes this doc worth reading before starting new work on the pipeline.

@@ -23,7 +23,7 @@ i.e. the portion of demand that hydro + thermal must supply once variable renewa
 | `requirements.txt` | Python dependencies |
 | `DEM2025.csv` | ETESA hourly demand (input) |
 | `solar_eolica_hidro_horario_2025.csv` | Real ETESA generation (input) |
-| `renewables_ninja_2025.csv` | Weather cache, created on first run (not committed by default — commit it if you want fully offline reproducibility for others) |
+| `renewables_ninja_2025.csv` | Export of the downloaded API weather data, written by each run (traceability of the exact inputs used) |
 
 ## How to Run
 
@@ -36,23 +36,18 @@ Place these next to the notebook, with these exact names:
 | `DEM2025.csv` | wide CSV | first column = date (`Unnamed: 0`), then `H1`…`H24` = hourly demand in MW |
 | `solar_eolica_hidro_horario_2025.csv` | long CSV | `datetime`, `solar_mw_real`, `eolica_mw_real`, `hidro_mw_real` |
 
-### 2. Weather data (Renewables.ninja API, cached)
+### 2. Weather data (Renewables.ninja API)
 
 The meteorological features (`irradiance_direct`, `irradiance_diffuse`, `temperature`,
-`wind_speed`) come from the [Renewables.ninja](https://www.renewables.ninja) API (MERRA-2
-reanalysis) and are **cached locally** for reproducibility:
+`wind_speed`) are pulled live from the [Renewables.ninja](https://www.renewables.ninja) API
+(MERRA-2 reanalysis). Running the download cells requires:
 
-- **First run:** set your API token in the environment —
-  ```bash
-  export RENEWABLES_NINJA_TOKEN=<your token>   # from renewables.ninja/profile
-  ```
-  The response is saved to `renewables_ninja_2025.csv`.
-- **Later runs:** the cache is loaded automatically — fully offline, no token needed.
-  Delete the file to force a re-download.
+- internet access and a valid Renewables.ninja API token (set in the *data download* cell), and
+- a location for geocoding — the notebook prompts with `input()`, e.g. `Penonomé, Coclé, Panama`,
+  so the query can be pointed at any site.
 
-Site coordinates (Penonomé, Coclé, Panama: lat 8.52, lon −80.36) are fixed constants in the
-code. There is **no interactive input** anywhere — both the notebook and the `.py` run
-top-to-bottom unattended.
+After the download, the combined API data is **exported to `renewables_ninja_2025.csv`**, so the
+exact weather inputs behind a run are preserved on disk and results can be traced back to them.
 
 ### 3. Environment (Python 3.11)
 
@@ -64,9 +59,10 @@ pip install -r requirements.txt
 
 ```bash
 jupyter notebook MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb   # run cells top to bottom
-# or, non-interactively:
-python MACHINE_LEARNING_RESIDUAL_DEMAND.py
 ```
+
+The `.py` mirrors the notebook, but it calls `input()` and the live API, so the notebook
+is the intended entry point.
 
 ### 5. Expected output
 
@@ -91,8 +87,8 @@ python MACHINE_LEARNING_RESIDUAL_DEMAND.py
   Nov–Dec is the dry-season onset. Part of the test error reflects this distribution shift, which
   is realistic for deployment but worth keeping in mind when reading the metrics.
 - **Run-to-run variability.** Seeds are fixed (`set_random_seeds(42)` per rolling iteration), but
-  TensorFlow op-level nondeterminism can still move DNN metrics by ≈ ±0.05 pp MAPE between runs.
-  The data side is fully deterministic once the weather cache exists.
+  TensorFlow op-level nondeterminism can still move DNN metrics by ≈ ±0.05 pp MAPE between runs —
+  cite results from one named run. The exported weather CSV records the exact MERRA-2 inputs used.
 
 See `MACHINE LEARNING RD CONTEXT.md` for the full methodology reference, results history,
 fixes log, and optimization roadmap.
