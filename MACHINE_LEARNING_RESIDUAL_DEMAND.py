@@ -326,6 +326,27 @@ df['is_holiday'] = df['local_time'].dt.date.map(lambda d: int(d in _holiday_set)
 # Note: is_holiday is a SPARSE binary feature (only 14 days per year = ~1 of the data).
 # It is suitable for flat feature spaces (XGBoost handles sparse splits well),
 
+# Holiday-proximity features (roadmap P1): is_holiday only fires ON the holiday, so it
+# cannot represent the demand ramp-down/up in the days around one. Distance-to-holiday
+# gives the model a smooth signal instead. Both are pure calendar arithmetic against a
+# fixed, known-in-advance holiday list — no observed data (demand/hydro/weather) is
+# involved, so this is leakage-free for an h+24 forecast exactly like `is_holiday` itself.
+_holiday_ts = sorted(pd.Timestamp(d) for d in _panama_holidays_2025)
+_dates = df['local_time'].dt.normalize()
+
+_days_to_next = pd.Series(np.inf, index=df.index)
+_days_since_last = pd.Series(np.inf, index=df.index)
+for h in _holiday_ts:
+    delta_days = (h - _dates).dt.days.astype(float)
+    _days_to_next = np.minimum(_days_to_next, delta_days.where(delta_days >= 0, np.inf))
+    _days_since_last = np.minimum(_days_since_last, (-delta_days).where(delta_days <= 0, np.inf))
+
+HOLIDAY_CLIP = 3
+# Clip to +/-3 days: the observed spikes are 1-2 days before a holiday (Dec 23 -> Dec 25,
+# Nov 26 -> Nov 28), so the effect is local. Clipping keeps far-from-holiday hours from
+# looking artificially more "different" than they are, and keeps the feature well-scaled.
+df['days_to_next_holiday']   = _days_to_next.clip(upper=HOLIDAY_CLIP)
+df['days_since_last_holiday'] = _days_since_last.clip(upper=HOLIDAY_CLIP)
 
 # ── Day-of-week cyclic encoding ───────────────────────────────────────────────────
 df['dow_sin'] = np.sin(2 * np.pi * df['local_time'].dt.dayofweek / 7)
@@ -437,7 +458,7 @@ df['demanda_residual_h24'] = df['demanda_residual'].shift(-HORIZON)
 # The value we want to predict: residual demand 24 hours ahead.
 # shift(-24) aligns each row's features with the target 24 hours later.
 
-#Final feature order: 30 flat features + 1 target
+#Final feature order: 32 flat features + 1 target (v26.8 adds 2 holiday-proximity features, P1)
 cols_order = [
     # Current meteorology (7)
     'irradiance_direct', 'irradiance_diffuse', 'temperature',
@@ -445,9 +466,10 @@ cols_order = [
     # NWP horizon covariates at t+24 (4) ← most impactful group (v22)
     'irradiance_direct_h24', 'irradiance_diffuse_h24',
     'temperature_h24', 'wind_speed_h24',
-    # Calendar features (11)
+    # Calendar features (13)
     'month', 'hour', 'hour_sin', 'hour_cos', 'month_sin', 'month_cos',
     'is_weekday', 'hour_weekday', 'is_holiday', 'dow_sin', 'dow_cos',
+    'days_to_next_holiday', 'days_since_last_holiday',
     # Lagged target — Lagged Approach, snn_forec (4)
     'demanda_residual',
     'residual_L48', 'residual_L336', 'residual_L168',
@@ -477,9 +499,9 @@ print(df.describe().round(2))
 # plot the data
 # ────────────────────────────────────────────────────────────────────────────
 
-df.plot(subplots=True, figsize=(14, 42), layout=(16, 2))
-# Plot each of the 31 columns in its own sub-panel.
-# layout=(16, 2) gives 32 slots — enough for 31 columns. layout=(9, 2) would fail (only 18 slots).
+df.plot(subplots=True, figsize=(14, 46), layout=(18, 2))
+# Plot each of the 33 columns (32 features + target at this stage) in its own sub-panel.
+# layout=(18, 2) gives 36 slots — must exceed the column count; update this if columns change.
 plt.tight_layout()
 plt.show()
 
@@ -620,7 +642,7 @@ target_h24   = 'demanda_residual_h24'
 
 features_h24 = [c for c in df.columns if c != target_h24]
 # List of all feature column names — every column except the target.
-# Should be exactly 30 features.
+# Should be exactly 32 features.
 
 forecasts = {
     k: pd.DataFrame(data=np.nan, columns=[target_h24], index=datetime_index)
@@ -698,7 +720,7 @@ def get_targets_features(df_in, T, scale=False):
 
     Parameters
     ----------
-    df_in  : DataFrame — the full dataset with all 30 features and the target column.
+    df_in  : DataFrame — the full dataset with all 32 features and the target column.
     T      : int       — training cutoff (number of rows used for training).
     scale  : bool      — if True, apply StandardScaler to X and Y (for DNN);
                          if False, return raw arrays (for XGBoost).
@@ -731,17 +753,17 @@ def get_targets_features(df_in, T, scale=False):
 
 # ────────────────────────────────────────────────────────────────────────────
 # Below we verify the function by calling it once at the fixed training cutoff T = 7000.
-# We check that the shapes are correct and that the feature count equals exactly 30.
+# We check that the shapes are correct and that the feature count equals exactly 32.
 # ────────────────────────────────────────────────────────────────────────────
 
 T_test = 7000
 Y_v, X_v, Xt_v = get_targets_features(df_in=df, T=T_test)
 
-print(f'X_train: {X_v.shape}   X_test: {Xt_v.shape}   (should be (7000, 30) and (24, 30))')
+print(f'X_train: {X_v.shape}   X_test: {Xt_v.shape}   (should be (7000, 32) and (24, 32))')
 print(f'Y_train: {Y_v.shape}   (should be (7000, 1))')
 
-assert X_v.shape[1] == 30, f'Feature count error: {X_v.shape[1]}'
-# Hard assertion: the number of features must be exactly 30 as documented in the context.
+assert X_v.shape[1] == 32, f'Feature count error: {X_v.shape[1]}'
+# Hard assertion: the number of features must be exactly 32 as documented in the context.
 
 print(f'\n Shapes correct')
 print(f'\nFeature list ({len(features_h24)} features):')
@@ -1362,7 +1384,7 @@ for ax, (name, preds), color in zip(axes, all_preds.items(), ['orange', 'darkora
     # individual forecast cycles unreadable.
 
 plt.suptitle(
-    'v26 — DNN vs XGBoost | Lagged Approach | 30 Features | First 7 Test Days',
+    'v26 — DNN vs XGBoost | Lagged Approach | 32 Features | First 7 Test Days',
     fontsize=12, y=1.02)
 plt.tight_layout()
 plt.show()
