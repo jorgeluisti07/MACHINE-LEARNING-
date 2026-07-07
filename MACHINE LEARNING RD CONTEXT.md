@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.6 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Panama season dates corrected
+**Version:** v26.7 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Exact spike dates identified and cross-referenced against holiday calendar
 
 > **Standing rule:** the Renewables.ninja download code (geocoding prompt, token, API calls) is
 > owned by the user — **do not modify it** without explicit instruction. See §8 row 10.
@@ -69,10 +69,9 @@ versions of this doc claimed. The test window (Nov 2–Dec 30) is where the actu
 training — and only December falls in the newly-started dry season. This narrows (but doesn't
 remove) the distributional-shift explanation for the XGBoost overfit gap (§9.1): the shift is
 concentrated in the **December portion** of the test set, not spread across the whole 58 days.
-This is also directly relevant to the two documented error-spike dates (§10 P1): **Nov 28** sits in
-the wet season (same regime as training), while **Dec 25** sits in the new dry-season onset —
-worth checking in the per-day error data whether the Dec 25 spike is larger/different in character
-than the Nov 28 one, since one is an in-distribution holiday and the other is not.
+This is also directly relevant to the actual worst-error dates — see §10 P1 for the exact top-10
+spike days (computed from the per-day error export, not read off a plot) and the confirmed
+in-season-vs-new-season confound between the two worst days.
 
 ---
 
@@ -241,6 +240,7 @@ bit-reproducibility is ever required, try `tf.config.experimental.enable_op_dete
 | 11 | Stale EDA comments claimed `demanda_residual`→target correlation "r ≈ 0.3–0.4"; the actual plot shows **r = 0.685** | ACF/scatter markdown + correlation-matrix comments, both files | Corrected to r ≈ 0.69 ("strongest single predictor") — consistent with `demanda_residual` also being XGBoost's #1 feature (gain ≈ 0.24–0.29) | ✅ Fixed from run evidence (photos) |
 | 12 | Pipeline had never actually been executed end-to-end in this environment against the user's real weather data — all prior numbers came from the user's own local runs (photos/typed results) | N/A — this is a "did we ever check" item, not a code fix | Ran the full `.py` pipeline (data load → both rolling loops → results table) directly against the user-supplied `renewables_ninja_2025.csv`, in an isolated scratch copy (repo untouched). Confirmed the pipeline executes cleanly end-to-end and reproduces the user's own numbers within expected run-to-run variance (§7.3). Quantified the XGBoost/DNN overfit gap directly from the run output, which reshaped §10's priority order (P5 promoted to top) | ✅ Executed and recorded — see §9.1 |
 | 13 | Doc incorrectly stated Panama's wet season as "Jan–Oct" and dry season as "Nov–Dec onset" | §3 Training/Test Dates, §9.1 seasonal-shift explanation, §10 P1, README limitations | **Corrected per user:** dry/summer season = **Dec–Apr**, rainy/wet season = **May–Nov**. This means training (mid-Jan–Oct) is mostly wet season (not purely as before), and the wet→dry transition happens **mid-way through the test window** (Nov = wet, Dec = new dry onset), not before it. Narrows the distributional-shift story to the December portion of test, and flags a possible confound between the Nov 28 (in-season) vs Dec 25 (new-season) error spikes in P1 | ✅ Corrected per direct user input |
+| 14 | §10 P1's spike dates ("Nov 26–28 / Dec 22–25") were read off a plot, not computed — imprecise | Scratch re-run, exported daily/hourly error CSVs | Re-ran the pipeline with a per-day/per-hour error export and cross-referenced the exact top-10 worst days against the user's full 2025 holiday list. **Confirmed:** the two worst days (Dec 23, Nov 26) are 1–2 days *before* a major holiday (Dec 24/25, Nov 28) — not on the holiday itself — and 7 of the top 10 worst days sit within 0–2 days of a holiday. Confirms the P1 hypothesis with real dates instead of an approximate window; also confirms Dec 23 (new dry season) is worse than Nov 26 (in-season), consistent with the seasonal confound in row 13 | ✅ Confirmed with exact dates — see §10 P1 |
 
 **How this file stays useful:** when something in the notebook/script turns out wrong or gets fixed, add a row here rather than just fixing it silently — that's what makes this doc worth reading before starting new work on the pipeline.
 
@@ -293,10 +293,37 @@ engineering — see §10's re-prioritization below.**
 Derived from the post-fix diagnostics (XGBoost feature-importance chart at T_last=8368, absolute-error time series, 7-day zoom plots, per-feature time-series panels, correlation matrix). Ordered by expected payoff ÷ effort. Implement one at a time, re-run, and record the delta in §8 — never batch several model changes into one run or you can't attribute the gain.
 
 ### P1 — Holiday-proximity features (targets the two biggest error events)
-**Evidence:** the two largest error spikes (~480 MW, ~7× the 69.7 MW MAE) occur around Nov 26–28 and Dec 22–25 — both adjacent to national holidays (Nov 28, Dec 25) — yet `is_holiday` has near-zero XGBoost gain. A same-day binary flag can't capture bridge days, eves, or the demand ramp-down before/after a holiday.
-**Confound to check (from the season correction, §3):** Nov 28 falls in the wet season (same regime as most of training), while Dec 25 falls in the newly-started dry season (a regime training barely saw). So the Dec 25 spike may be partly a **seasonal-shift** error, not purely a holiday error — worth checking the two spikes' error magnitude/shape separately before attributing both entirely to the holiday effect.
+**Evidence — exact spike dates, computed from per-day/per-hour error export (not read off a plot):**
+
+| Rank | Date (day) | Ensemble daily MAE | Nearest holiday | Distance |
+|---|---|---|---|---|
+| 1 | **Dec 23 (Tue)** | 253.8 MW | Dec 24 Christmas Eve / Dec 25 Christmas | 1–2 days **before** |
+| 2 | **Nov 26 (Wed)** | 247.7 MW | Nov 28 Independence from Spain | 2 days **before** |
+| 3 | Nov 8 (Sat) | 151.2 MW | Nov 5 Colón Day / Nov 10 Shout in Villa de los Santos | inside the Nov 3–10 holiday cluster |
+| 4 | Nov 2 (Sun) | 147.9 MW | Nov 3 Independence Day | 1 day before |
+| 5 | Dec 6 (Sat) | 127.0 MW | Dec 8 Mother's Day | 2 days before |
+| 6 | Nov 17 (Mon) | 122.7 MW | *(none nearby)* | — |
+| 7 | Nov 3 (Mon) | 111.0 MW | **on** Independence Day | 0 |
+| 8 | Nov 5 (Wed) | 103.9 MW | **on** Colón Day | 0 |
+| 9 | Dec 18 (Thu) | 100.3 MW | *(none nearby)* | — |
+| 10 | Nov 16 (Sun) | 91.5 MW | *(none nearby)* | — |
+
+Worst single hours: **500 MW** (Dec 23, 11:00) and **483.9 MW** (Nov 26, 12:00), both midday.
+**7 of the top 10 worst days sit within 0–2 days of a national holiday** — and critically, the two
+*worst* days are **not** the holidays themselves, they're **2 days before** one (pre-holiday
+demand ramp-down), which a same-day `is_holiday` flag structurally cannot represent. `is_holiday`
+also has near-zero XGBoost importance, consistent with it not capturing this.
+
+**Confound confirmed (from the season correction, §3):** the single worst day (Dec 23) sits in the
+newly-started dry season (a regime training barely saw), while the 2nd-worst (Nov 26) sits in the
+wet season (same regime as most of training) — yet Dec 23 is *worse*. This is consistent with two
+effects stacking on top of each other in December: the pre-holiday ramp *and* the seasonal-shift
+error. Expect the holiday-proximity features to help both spikes, but don't expect them to fully
+close the Dec 23 gap alone — some of that day's error is likely seasonal, addressed separately (or
+not at all, given only one year of data to learn a season transition from).
+
 **Action:** add `days_to_next_holiday` and `days_since_last_holiday` (clipped to e.g. ±3), and/or `is_holiday_adjacent`. Cheap, leakage-free (the holiday calendar is known in advance — genuinely available at forecast time).
-**Expected impact:** directly attacks the tail errors that dominate RMSE; may not move MAPE much but should cut the worst days. Given the confound above, expect a cleaner win on the Nov 28 spike than the Dec 25 one.
+**Expected impact:** directly attacks the tail errors that dominate RMSE; may not move MAPE much but should cut the worst days — expect a cleaner win on Nov 26/28 than on Dec 23, per the confound above.
 
 ### P2 — Prune dead features (simplify + reduce variance)
 **Evidence:** bottom of the importance chart: `hidro_mw`, `is_holiday`, `hidro_fraction_L24`, `hidro_anomaly_L24`, `residual_L48`, `temperature`, `irradiance_diffuse`, `eolica_mw` all contribute < ~0.01 gain each. Also `hour`/`hour_sin`/`hour_cos` triple-encode the same signal for XGBoost.
@@ -319,7 +346,8 @@ recover, before reaching for new features at all. Updated order:
    validation tail, never on test) may beat the current flat 50/50. Almost zero cost — same stored
    forecasts, just a different scalar.
 3. **P1 (holiday-proximity features)** — still the best lever for the *tail* errors specifically
-   (the ~480 MW spike days), which neither P5 nor re-weighting addresses. Do this once the
+   (the Dec 23 / Nov 26 spike days — see §10 P1 for exact dates), which neither P5 nor re-weighting
+   addresses. Do this once the
    regularization/weighting quick wins are banked, so its effect is measured on a cleaner baseline.
 4. **P2 (feature pruning)** — do after P5, not before: a regularization sweep may already reduce
    XGBoost's effective reliance on the near-zero-importance features, so pruning them explicitly
