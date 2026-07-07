@@ -1,8 +1,8 @@
 # Residual Demand Forecasting — ETESA Panama 2025
 
 Day-ahead (h+24) hourly **residual demand** forecasting for the Panamanian grid, comparing a
-**Deep Neural Network (DNN)** and **XGBoost**, evaluated with expanding-window (walk-forward)
-rolling validation against a naive persistence benchmark.
+**Deep Neural Network (DNN)** and **XGBoost** (plus their **ensemble**, the best model), evaluated
+with expanding-window (walk-forward) rolling validation against a naive persistence benchmark.
 
 Residual demand is defined as:
 
@@ -17,14 +17,17 @@ i.e. the portion of demand that hydro + thermal must supply once variable renewa
 | File | Description |
 |---|---|
 | `MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb` | Main notebook (intended entry point) |
-| `MACHINE_LEARNING_RESIDUAL_DEMAND.py` | Script mirror of the notebook |
-| `MACHINE LEARNING RD CONTEXT.md` | Methodology reference document |
+| `MACHINE_LEARNING_RESIDUAL_DEMAND.py` | Script mirror of the notebook (runs non-interactively) |
+| `MACHINE LEARNING RD CONTEXT.md` | Methodology reference: assumptions, fixes log, results, optimization roadmap |
+| `README.md` | This file |
+| `requirements.txt` | Python dependencies |
 | `DEM2025.csv` | ETESA hourly demand (input) |
 | `solar_eolica_hidro_horario_2025.csv` | Real ETESA generation (input) |
+| `renewables_ninja_2025.csv` | Weather cache, created on first run (not committed by default — commit it if you want fully offline reproducibility for others) |
 
 ## How to Run
 
-### Required input files
+### 1. Required input files
 
 Place these next to the notebook, with these exact names:
 
@@ -33,40 +36,47 @@ Place these next to the notebook, with these exact names:
 | `DEM2025.csv` | wide CSV | first column = date (`Unnamed: 0`), then `H1`…`H24` = hourly demand in MW |
 | `solar_eolica_hidro_horario_2025.csv` | long CSV | `datetime`, `solar_mw_real`, `eolica_mw_real`, `hidro_mw_real` |
 
+### 2. Weather data (Renewables.ninja API, cached)
+
 The meteorological features (`irradiance_direct`, `irradiance_diffuse`, `temperature`,
-`wind_speed`) are **not** in the CSVs — they are pulled live from the
-[Renewables.ninja](https://www.renewables.ninja) API (MERRA-2 dataset). Running the pipeline
-therefore requires:
+`wind_speed`) come from the [Renewables.ninja](https://www.renewables.ninja) API (MERRA-2
+reanalysis) and are **cached locally** for reproducibility:
 
-- internet access and a valid Renewables.ninja API token (set in the *data download* cell), and
-- a location for geocoding — the notebook prompts with `input()`; enter `Penonomé, Coclé, Panama`.
+- **First run:** set your API token in the environment —
+  ```bash
+  export RENEWABLES_NINJA_TOKEN=<your token>   # from renewables.ninja/profile
+  ```
+  The response is saved to `renewables_ninja_2025.csv`.
+- **Later runs:** the cache is loaded automatically — fully offline, no token needed.
+  Delete the file to force a re-download.
 
-### Environment (Python 3.11)
+Site coordinates (Penonomé, Coclé, Panama: lat 8.52, lon −80.36) are fixed constants in the
+code. There is **no interactive input** anywhere — both the notebook and the `.py` run
+top-to-bottom unattended.
+
+### 3. Environment (Python 3.11)
 
 ```bash
-pip install pandas numpy matplotlib requests geopy statsmodels scipy seaborn \
-            scikit-learn xgboost tensorflow tqdm
+pip install -r requirements.txt
 ```
 
-### Run
+### 4. Run
 
 ```bash
-jupyter notebook MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb   # then run cells top to bottom
+jupyter notebook MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb   # run cells top to bottom
+# or, non-interactively:
+python MACHINE_LEARNING_RESIDUAL_DEMAND.py
 ```
 
-The `.py` mirrors the notebook, but it calls `input()` and the live API on import, so the notebook
-is the intended entry point.
-
-### Expected output
+### 5. Expected output
 
 - Rolling day-ahead forecast plots (actual vs forecast, 7-day zoom, absolute error) for DNN and XGBoost.
 - XGBoost feature-importance chart (gain).
 - Naive persistence benchmark and per-model selection (must beat naive; overfit gap < 10 pp).
-- A final **results table** reporting, per model (DNN, XGBoost, Naive), both relative error
-  (**MAPE %**, **WAPE %**) and absolute error in MW (**MAE**, **RMSE**), so the operational
-  magnitude of the error is explicit alongside the ratios.
+- A final **results table** reporting, per model (DNN, XGBoost, **Ensemble**, Naive), both relative
+  error (**MAPE %**, **WAPE %**) and absolute error in MW (**MAE**, **RMSE**).
 
-## Limitations
+## Assumptions & limitations
 
 - **Perfect-foresight weather (h+24).** The four `*_h24` meteorological features use
   `shift(-24)` — the *true* future MERRA-2 reanalysis value, not an operational forecast (the full
@@ -77,3 +87,12 @@ is the intended entry point.
   `hidro_anomaly_L24`) are rebuilt inside each rolling window from **training-only data**
   (`rebuild_hidro_profile_features`), so no window sees a `(month, hour)` hydro average that
   includes months past its own cutoff.
+- **Seasonal train/test shift.** Training covers Jan–Oct (wet season, peak hydro); the test window
+  Nov–Dec is the dry-season onset. Part of the test error reflects this distribution shift, which
+  is realistic for deployment but worth keeping in mind when reading the metrics.
+- **Run-to-run variability.** Seeds are fixed (`set_random_seeds(42)` per rolling iteration), but
+  TensorFlow op-level nondeterminism can still move DNN metrics by ≈ ±0.05 pp MAPE between runs.
+  The data side is fully deterministic once the weather cache exists.
+
+See `MACHINE LEARNING RD CONTEXT.md` for the full methodology reference, results history,
+fixes log, and optimization roadmap.

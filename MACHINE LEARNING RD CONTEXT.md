@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.2 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Ensemble confirmed as best model
+**Version:** v26.3 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Reproducibility pass applied
 **Companion files:** `MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb`, `MACHINE_LEARNING_RESIDUAL_DEMAND.py`, `README.md` (How to Run)
 
 ---
@@ -20,7 +20,8 @@
 
 | Source | Description | Format |
 |---|---|---|
-| Renewables.ninja API | Solar/wind resource data for Coclé, Penonomé, Panama (lat=8.52, lon=-80.36). MERRA-2 reanalysis. 859 MW solar / 336 MW wind. Full year 2025. | REST API → JSON |
+| Renewables.ninja API | Solar/wind resource data for Coclé, Penonomé, Panama (lat=8.52, lon=-80.36 — fixed constants in code). MERRA-2 reanalysis. 859 MW solar / 336 MW wind. Full year 2025. Token via `RENEWABLES_NINJA_TOKEN` env var, needed on first run only. | REST API → JSON |
+| `renewables_ninja_2025.csv` | Local cache of the API response, written on first run; later runs load it and work fully offline (delete to force re-download). | CSV (generated) |
 | `solar_eolica_hidro_horario_2025.csv` | Real ETESA metered generation: `solar_mw_real`, `eolica_mw_real`, `hidro_mw_real`. Hourly, 2025. | **CSV** |
 | `DEM2025.csv` | Real ETESA hourly electricity demand 2025. Wide format (date × 24 hours, columns `H1`..`H24`). | **CSV** |
 
@@ -194,7 +195,15 @@ The four `*_h24` meteorological features (`irradiance_direct_h24`, `irradiance_d
 
 **Fix:** `rebuild_hidro_profile_features(df_in, T)` now refits the `(month, hour)` profile from **training-only rows `[:T]`** inside `get_targets_features`, once per rolling window. Unseen `(month, hour)` combinations fall back to the training-window mean. Verified leakage-free with unit tests (invariance to post-cutoff data, no NaN in any train/test slice, correct unseen-key fallback).
 
-**Impact on §9 numbers:** this fix changes the training signal for early rolling windows, so the historical 7.08%/7.35% MAPE figures **must be regenerated** — they predate the fix.
+**Impact on §9 numbers:** this fix changes the training signal for early rolling windows, so the historical 7.08%/7.35% MAPE figures **must be regenerated** — they predate the fix. *(Done — see §9.1.)*
+
+### 7.3 Run-to-run variability (DNN)
+Seeds are fixed (`set_random_seeds(42)` at each rolling iteration), yet small differences between
+runs have been observed (DNN MAPE 7.02% vs 7.08% across two runs, ≈ ±0.05 pp; MAE 69.7 vs 70.3 MW)
+— consistent with TensorFlow op-level nondeterminism, which seeding alone does not eliminate.
+**Rule: cite results from one named run, never mix numbers across runs.** If exact
+bit-reproducibility is ever required, try `tf.config.experimental.enable_op_determinism()`
+(slower training). The data side is fully deterministic once the weather cache exists (§8 row 10).
 
 ---
 
@@ -207,10 +216,12 @@ The four `*_h24` meteorological features (`irradiance_direct_h24`, `irradiance_d
 | 3 | Hydro seasonal baseline (`hidro_typical_h24`, `hidro_anomaly_L24`) computed once on the full year before the rolling loop — look-ahead leak into early windows | `get_targets_features` / hydro feature block | Added `rebuild_hidro_profile_features(df_in, T)`, refit per-window on training-only rows; called first thing inside `get_targets_features` | ✅ Fixed, unit-tested (3/3 tests pass: no leakage, no NaN, correct fallback), reviewed by an adversarial subagent pass — no findings |
 | 4 | Results only reported percentage error (MAPE/WAPE); no absolute-MW magnitude | End-of-notebook results section | Added `results_summary` table: MAPE %, WAPE %, MAE MW, RMSE MW per model (DNN/XGBoost/Naive) | ✅ Added, dry-run verified |
 | 5 | Excessive line-by-line "what it does" comments in core pipeline cells (imports, feature extraction) | Throughout `.py`/`.ipynb` | Trimmed to docstrings, section headers, and "why" comments only | ✅ Done |
-| 6 | Hardcoded Renewables.ninja API token in source | Data-download cell | **Not fixed** — flagged to the user, out of scope of the requested changes | ⚠️ Open — rotate the token and move to an env var before any public sharing |
+| 6 | Hardcoded Renewables.ninja API token in source | Data-download cell | Token now read from the `RENEWABLES_NINJA_TOKEN` env var — no secret in source. **The old token is still in git history**, so it must still be rotated at renewables.ninja | ⚠️ Half-closed — code fixed; **rotate the exposed token** (user action) |
 | 7 | §9 results were stale (pre-leakage-fix) | This doc | Notebook re-run after the fix; post-fix results recorded in §9.1 (DNN 7.02%, XGB 7.31%, MAE ~70 MW), pre-fix kept in §9.2 for comparison. Fix confirmed harmless-to-beneficial for accuracy | ✅ Verified from re-run output |
 | 8 | Error spikes on holiday-adjacent days despite `is_holiday` feature; several near-zero-importance features | Post-fix diagnostics (feature importance T_last=8368, error plots) | Documented as prioritized optimization roadmap (§10, P1–P7) — not yet implemented; implement one at a time and record deltas here | 📋 Roadmap written, pending implementation |
 | 9 | **P3 implemented and confirmed:** `Ensemble = 0.5·(DNN + XGBoost)` added as a **fourth row** of `results_summary` (DNN/XGBoost/Naive rows unchanged, no retraining — averages the stored test forecasts) | Results-summary block, both `.py` and `.ipynb` | Adversarially reviewed (slices/shapes/leakage all confirmed clean); re-run confirms Ensemble beats both base models on **all four** metrics (MAPE 6.88% vs 7.02%/7.31%; RMSE 95.5 vs 96.6/101.8 MW) — see §9.1 | ✅ Confirmed best model |
+| 10 | **Reproducibility pass:** (a) interactive `input()` geocoding via geopy/Nominatim blocked unattended runs — replaced with fixed constants `lat, lon = 8.52, -80.36`; (b) API data re-downloaded every run — first run now caches to `renewables_ninja_2025.csv`, later runs load it fully offline; (c) no pinned dependency list — added `requirements.txt` (geopy dropped); (d) README/How-to-Run rewritten around the new flow; `.py` now runs non-interactively | Data-download cells, both `.py` and `.ipynb`; README; notebook How-to-Run cell | All four applied; syntax-validated. **Note:** re-run cannot be verified in this environment (no API access) — first local run should confirm the cache write/read round-trip | ✅ Code in; verify on next local run |
+| 11 | Stale EDA comments claimed `demanda_residual`→target correlation "r ≈ 0.3–0.4"; the actual plot shows **r = 0.685** | ACF/scatter markdown + correlation-matrix comments, both files | Corrected to r ≈ 0.69 ("strongest single predictor") — consistent with `demanda_residual` also being XGBoost's #1 feature (gain ≈ 0.24–0.29) | ✅ Fixed from run evidence (photos) |
 
 **How this file stays useful:** when something in the notebook/script turns out wrong or gets fixed, add a row here rather than just fixing it silently — that's what makes this doc worth reading before starting new work on the pipeline.
 

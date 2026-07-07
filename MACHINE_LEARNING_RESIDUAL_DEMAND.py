@@ -59,6 +59,7 @@ MAX_LAG = LAG_2
 # data download
 # ────────────────────────────────────────────────────────────────────────────
 
+import os
 import requests, json as _json
 import pandas as pd
 import numpy as np
@@ -67,27 +68,17 @@ import matplotlib.pyplot as plt
 pd.set_option("display.max_rows",    None)
 pd.set_option("display.max_columns", None)
 
-from geopy.geocoders import Nominatim
+# Site coordinates: Penonomé, Coclé, Panama — where the 859 MW solar / 336 MW wind
+# fleet modelled by the API query is located. Fixed constants for reproducibility
+# (previously geocoded interactively from user input via geopy/Nominatim, which
+# blocked automated runs and added a live third-party service to the pipeline).
+lat, lon = 8.52, -80.36
 
-geolocator = Nominatim(user_agent='etesa_tfm')
-# Create a geolocator object using the OpenStreetMap Nominatim service.
-# user_agent is a required label so the service knows who is calling it.
-
-place = input('Enter location (e.g. Penonomé, Coclé, Panama): ')
-# Ask the user to type the name of the location for the API query.
-
-information = geolocator.geocode(place)
-# Convert the place name into geographic coordinates (geocoding).
-
-lat = information[1][0]
-lon = information[1][1]
-# Extract latitude and longitude from the geocoder result tuple.
-
-print(lat, lon)
-# Display the coordinates to verify they correspond to the intended location.
-
-token    = 'c4672deddb9f6acfa94e9cdbb34f6414fd51f255'
-# Personal access token for the Renewables.ninja API — replace with your own if expired.
+token = os.environ.get('RENEWABLES_NINJA_TOKEN', '')
+# Personal access token for the Renewables.ninja API, read from the environment so
+# no secret lives in the source. Get one at https://www.renewables.ninja/profile then:
+#   export RENEWABLES_NINJA_TOKEN=<your token>
+# Only needed for the first run — afterwards the cached CSV (below) is used instead.
 
 api_base   = 'https://www.renewables.ninja/api/'
 url_solar  = api_base + 'data/pv'
@@ -123,50 +114,53 @@ args_wind = {
 # The raw flag returns irradiance_direct, irradiance_diffuse, temperature, wind_speed —
 # which become our meteorological features and, shifted by -24, the NWP horizon covariates.
 
-s = requests.session()
-s.headers = {'Authorization': 'Token ' + token}
-# Create an HTTP session and attach the API token to every request header.
+# ── Fetch from the API, or load the local cache ──────────────────────────────────
+# The MERRA-2 reanalysis for 2025 is fixed historical data, so the API response is
+# cached to a CSV on the first run. Later runs load the file and work fully offline,
+# which makes results reproducible without network access or an API token.
+# Delete the file to force a fresh download.
+NINJA_CACHE = 'renewables_ninja_2025.csv'
 
-# ── Solar ────────────────────────────────────────────────────────────────────────
-r = s.get(url_solar, params=args_solar)
-print('Solar status:', r.status_code)
-# Status 200 means the request succeeded. Any other code indicates an error.
+if os.path.exists(NINJA_CACHE):
+    print(f'Using cached Renewables.ninja data: {NINJA_CACHE}')
+    df_combined = pd.read_csv(NINJA_CACHE, index_col=0, parse_dates=True)
+else:
+    if not token:
+        raise RuntimeError(
+            'No cache file and RENEWABLES_NINJA_TOKEN is not set. Get a token at '
+            'https://www.renewables.ninja/profile and export it, or place '
+            f'{NINJA_CACHE} next to this script.'
+        )
+    s = requests.session()
+    s.headers = {'Authorization': 'Token ' + token}
 
-parsed_solar = _json.loads(r.text)
-# Parse the raw JSON text into a Python dictionary.
+    # ── Solar ──
+    r = s.get(url_solar, params=args_solar)
+    print('Solar status:', r.status_code)   # 200 = success
+    parsed_solar = _json.loads(r.text)
+    data = pd.read_json(_json.dumps(parsed_solar['data']), orient='index')
+    data['electricity'] = data['electricity'] / 1000   # kW → MW
+    # Strip timezone so timestamps align with the tz-naive ETESA data.
+    data['local_time'] = pd.to_datetime(data['local_time']).dt.tz_localize(None)
+    data = data.set_index('local_time')
 
-data = pd.read_json(_json.dumps(parsed_solar['data']), orient='index')
-# The 'data' key holds the time-indexed results. orient='index' tells pandas that
-# the outer dictionary keys are the row indices (timestamps).
+    # ── Wind ──
+    r_wind = s.get(url_wind, params=args_wind)
+    parsed_wind = _json.loads(r_wind.text)
+    wind_data = pd.read_json(_json.dumps(parsed_wind['data']), orient='index')
+    wind_data['local_time'] = pd.to_datetime(wind_data['local_time']).dt.tz_localize(None)
+    wind_data = wind_data.set_index('local_time')
+    wind_data['electricity'] = wind_data['electricity'] / 1000
 
-data['electricity'] = data['electricity'] / 1000
-# Convert from kW (the API default) to MW (our working unit for ETESA data).
-
-data['local_time'] = pd.to_datetime(data['local_time']).dt.tz_localize(None)
-# Convert the timestamp string to a pandas datetime and strip timezone info
-# so it aligns cleanly with the ETESA real-generation data (which is tz-naive).
-
-data = data.set_index('local_time')
-# Use the timestamp as the row index for time-series alignment.
-
-# ── Wind ─────────────────────────────────────────────────────────────────────────
-r_wind = s.get(url_wind, params=args_wind)
-parsed_wind = _json.loads(r_wind.text)
-wind_data = pd.read_json(_json.dumps(parsed_wind['data']), orient='index')
-wind_data['local_time'] = pd.to_datetime(wind_data['local_time']).dt.tz_localize(None)
-wind_data = wind_data.set_index('local_time')
-wind_data['electricity'] = wind_data['electricity'] / 1000
-# Same pipeline as solar — convert kW→MW and set the timestamp index.
-
-# ── Combine API outputs ──────────────────────────────────────────────────────────
-df_combined = pd.concat([
-    data[['irradiance_direct','irradiance_diffuse','temperature','electricity']].rename(
-        columns={'electricity': 'solar_mw'}),
-    wind_data[['wind_speed','electricity']].rename(
-        columns={'electricity': 'wind_mw'})
-], axis=1).dropna()
-# Concatenate the solar columns and the wind columns side by side (axis=1).
-# dropna() removes any hour where at least one API value is missing.
+    # ── Combine API outputs and write the cache ──
+    df_combined = pd.concat([
+        data[['irradiance_direct','irradiance_diffuse','temperature','electricity']].rename(
+            columns={'electricity': 'solar_mw'}),
+        wind_data[['wind_speed','electricity']].rename(
+            columns={'electricity': 'wind_mw'})
+    ], axis=1).dropna()
+    df_combined.to_csv(NINJA_CACHE)
+    print(f'API data cached to {NINJA_CACHE}')
 
 # ── Load ETESA real-generation data from CSV ─────────────────────────────────────
 real = pd.read_csv('solar_eolica_hidro_horario_2025.csv', index_col=0, parse_dates=True)
@@ -483,7 +477,8 @@ plt.show()
 # The ACF reveals the dominant periodic structure: peaks at lags 24 (daily), 168 (weekly),
 # and 336 (biweekly). These directly motivate the choice of lag features.
 # The scatter plot confirms that the current residual demand is a useful but imperfect predictor
-# of the 24-hour-ahead target (r ≈ 0.3–0.4), justifying the addition of lag and NWP features.
+# of the 24-hour-ahead target (r ≈ 0.69 in the actual run), justifying the addition of lag and
+# NWP features to explain the remaining ~50 % of variance.
 # ────────────────────────────────────────────────────────────────────────────
 
 from statsmodels.graphics.tsaplots import plot_acf
@@ -543,11 +538,11 @@ r = df.corr()
 print('Correlations with target (demanda_residual_h24):')
 print(r['demanda_residual_h24'].drop('demanda_residual_h24').sort_values(ascending=False).round(3))
 # Print the correlation of each feature with the target, sorted highest-to-lowest.
-# Key expected findings:
-#   demanda_residual (current):   r ≈ 0.3–0.4   (direct but weak — NWP needed)
-#   residual_L168:                r ≈ 0.600      (strongest lag)
+# Key expected findings (from the actual run):
+#   demanda_residual (current):   r ≈ 0.69   (strongest single predictor)
+#   residual_L168:                r ≈ 0.600  (strongest lag)
 #   residual_L336:                r ≈ 0.591
-#   irradiance_direct_h24:        r ≈ -0.4       (high solar → low residual demand)
+#   irradiance_direct_h24:        negative   (high solar → low residual demand)
 
 plt.figure(figsize=(10, 8))
 sns.heatmap(r, vmin=-1, vmax=1, annot=False, cmap='Spectral')
