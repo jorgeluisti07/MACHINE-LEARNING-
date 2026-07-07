@@ -91,6 +91,10 @@ is the intended entry point.
 - **Run-to-run variability.** Seeds are fixed (`set_random_seeds(42)` per rolling iteration), but
   TensorFlow op-level nondeterminism can still move DNN metrics by ≈ ±0.05 pp MAPE between runs —
   cite results from one named run. The exported weather CSV records the exact MERRA-2 inputs used.
+- **Holiday-proximity features helped XGBoost, not the DNN.** `days_to_next_holiday` /
+  `days_since_last_holiday` (32 features total) cut the two worst error days by 17–32%, but in doing
+  so improved XGBoost's overall test MAPE while making the DNN's slightly worse — report per-model
+  results rather than assuming a feature addition helps both models equally.
 
 See `MACHINE LEARNING RD CONTEXT.md` for the full methodology reference, results history,
 fixes log, and optimization roadmap.

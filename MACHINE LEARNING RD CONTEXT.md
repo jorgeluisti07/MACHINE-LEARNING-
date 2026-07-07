@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.7 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Exact spike dates identified and cross-referenced against holiday calendar
+**Version:** v26.8 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | P1 holiday-proximity features implemented, executed, and evaluated (32 features)
 
 > **Standing rule:** the Renewables.ninja download code (geocoding prompt, token, API calls) is
 > owned by the user — **do not modify it** without explicit instruction. See §8 row 10.
@@ -241,6 +241,7 @@ bit-reproducibility is ever required, try `tf.config.experimental.enable_op_dete
 | 12 | Pipeline had never actually been executed end-to-end in this environment against the user's real weather data — all prior numbers came from the user's own local runs (photos/typed results) | N/A — this is a "did we ever check" item, not a code fix | Ran the full `.py` pipeline (data load → both rolling loops → results table) directly against the user-supplied `renewables_ninja_2025.csv`, in an isolated scratch copy (repo untouched). Confirmed the pipeline executes cleanly end-to-end and reproduces the user's own numbers within expected run-to-run variance (§7.3). Quantified the XGBoost/DNN overfit gap directly from the run output, which reshaped §10's priority order (P5 promoted to top) | ✅ Executed and recorded — see §9.1 |
 | 13 | Doc incorrectly stated Panama's wet season as "Jan–Oct" and dry season as "Nov–Dec onset" | §3 Training/Test Dates, §9.1 seasonal-shift explanation, §10 P1, README limitations | **Corrected per user:** dry/summer season = **Dec–Apr**, rainy/wet season = **May–Nov**. This means training (mid-Jan–Oct) is mostly wet season (not purely as before), and the wet→dry transition happens **mid-way through the test window** (Nov = wet, Dec = new dry onset), not before it. Narrows the distributional-shift story to the December portion of test, and flags a possible confound between the Nov 28 (in-season) vs Dec 25 (new-season) error spikes in P1 | ✅ Corrected per direct user input |
 | 14 | §10 P1's spike dates ("Nov 26–28 / Dec 22–25") were read off a plot, not computed — imprecise | Scratch re-run, exported daily/hourly error CSVs | Re-ran the pipeline with a per-day/per-hour error export and cross-referenced the exact top-10 worst days against the user's full 2025 holiday list. **Confirmed:** the two worst days (Dec 23, Nov 26) are 1–2 days *before* a major holiday (Dec 24/25, Nov 28) — not on the holiday itself — and 7 of the top 10 worst days sit within 0–2 days of a holiday. Confirms the P1 hypothesis with real dates instead of an approximate window; also confirms Dec 23 (new dry season) is worse than Nov 26 (in-season), consistent with the seasonal confound in row 13 | ✅ Confirmed with exact dates — see §10 P1 |
+| 15 | **P1 implemented:** `days_to_next_holiday` / `days_since_last_holiday` (clipped ±3, leakage-free calendar arithmetic) added, feature count 30→32 | Feature engineering block, `cols_order`, `get_targets_features` assertion — both `.py`/`.ipynb`; also fixed a bug the new columns exposed (EDA `df.plot` layout `(16,2)`→`(18,2)`, ran out of subplot slots) | Unit-tested standalone (4/4 pass: exact values match the user's own spike dates, no leakage, no NaN/inf, correct year-boundary behavior). Adversarially reviewed — found 2 stale "30" references left in notebook comments/markdown (not in `.py`), fixed. Full end-to-end execution (twice — once for aggregate metrics, once with the daily-error export fixed): **Dec 23/Nov 26 daily MAE down 32%/17%** as targeted, but XGBoost improved (new best, 6.75% MAPE) while the DNN got worse (7.32%) — reported honestly, not spun. Reshapes §10's next step: try an XGBoost-favored ensemble weight | ✅ Implemented, tested, reviewed, executed — see §9.3 |
 
 **How this file stays useful:** when something in the notebook/script turns out wrong or gets fixed, add a row here rather than just fixing it silently — that's what makes this doc worth reading before starting new work on the pipeline.
 
@@ -277,6 +278,48 @@ split note already predicted (wet-season training vs dry-season test). **This re
 optimization roadmap: XGBoost has headroom to close via regularization, not just feature
 engineering — see §10's re-prioritization below.**
 
+### 9.3 P1 (holiday-proximity features) results — mixed on aggregate, clear win on the target spikes
+
+Full end-to-end execution with `days_to_next_holiday` / `days_since_last_holiday` added
+(32 features total, up from 30). **Report this honestly — it is not a clean win across the board:**
+
+| Model | MAPE | WAPE | sMAPE | R² | MAE (MW) | RMSE (MW) | Train MAPE | Overfit gap | Δ vs §9.1 (MAPE) |
+|---|---|---|---|---|---|---|---|---|---|
+| DNN | 7.32% | 6.58% | 7.04% | 0.7552 | 75.0 | 101.7 | 4.80% | 2.52 pp | **worse by 0.31 pp** |
+| XGBoost | **6.75%** | **5.86%** | 6.34% | **0.7996** | **66.8** | **92.0** | 3.50% | 3.24 pp | **better by 0.60 pp — new best individual model** |
+| Ensemble (still flat 0.5/0.5) | 6.82% | 6.01% | — | — | 68.6 | 93.0 | — | — | MAPE better (−0.07 pp), WAPE/MAE worse, RMSE better — **mixed** |
+| Naive | 11.57% | 10.17% | 11.24% | 0.3563 | 116.0 | 165.0 | — | — | — |
+
+**What actually happened, unvarnished:** XGBoost improved meaningfully — new best individual-model
+MAPE (6.75%), and `days_to_next_holiday` entered its top-10 feature importance (gain ≈ 0.028,
+ranked #9). The DNN got **worse** on every one of its four metrics. The flat 50/50 Ensemble, now
+averaging a stronger XGBoost with a weaker DNN, moved in different directions on different metrics
+— it is **no longer a clean win over the best individual model** the way it was in §9.1 (XGBoost
+alone now beats the Ensemble on 3 of 4 metrics: MAPE, WAPE, MAE). **This directly validates trying
+the weighted-ensemble idea from §10's "Recommended order"** — but the weight should now favor
+**XGBoost**, not the DNN, reversing the earlier assumption (made before P1, when the DNN was the
+stronger generalizer).
+
+**The target-spike result — this is the clean win.** The two days P1 was built to fix improved
+substantially (Ensemble daily MAE, same 58-day test window, same models retrained from scratch):
+
+| Date | Pre-P1 Ensemble MAE | Post-P1 Ensemble MAE | Change | Pre-P1 max hourly error | Post-P1 max hourly error |
+|---|---|---|---|---|---|
+| **Dec 23** | 253.8 MW | **172.0 MW** | **−32%** | 500.0 MW | 331.5 MW |
+| **Nov 26** | 247.7 MW | **204.9 MW** | **−17%** | 483.9 MW | 398.0 MW |
+
+Both are still the two worst days in the test set (rank #1 and #2 unchanged), but meaningfully less
+bad — exactly what §10 P1 predicted for a same-day-blind `is_holiday` flag being replaced with a
+distance signal. **Honest caveat:** some of this improvement could be attributable to ordinary
+run-to-run variance (§7.3) layered on top of the real feature effect; the magnitude here (−32%,
+−17%) is large enough relative to the ±0.05 pp MAPE variance band that it's very unlikely to be
+pure noise, but it hasn't been isolated with a repeated-seed experiment.
+
+**Recommended next step (updates §10):** try weighting the ensemble toward XGBoost (e.g.
+0.6·XGB + 0.4·DNN, tuned on the validation tail only) now that it's the stronger individual model
+post-P1 — this was already on the roadmap as a near-free experiment, just with the weight direction
+flipped from what made sense pre-P1.
+
 ### 9.2 Historical results — PRE-leakage-fix (v25, keep for comparison, do not cite as current)
 
 | Model | Test MAPE | Test WAPE | Test sMAPE | R² | Overfit |
@@ -292,7 +335,7 @@ engineering — see §10's re-prioritization below.**
 
 Derived from the post-fix diagnostics (XGBoost feature-importance chart at T_last=8368, absolute-error time series, 7-day zoom plots, per-feature time-series panels, correlation matrix). Ordered by expected payoff ÷ effort. Implement one at a time, re-run, and record the delta in §8 — never batch several model changes into one run or you can't attribute the gain.
 
-### P1 — Holiday-proximity features (targets the two biggest error events)
+### P1 — Holiday-proximity features ✅ IMPLEMENTED & EXECUTED (see §8 row 15, §9.3)
 **Evidence — exact spike dates, computed from per-day/per-hour error export (not read off a plot):**
 
 | Rank | Date (day) | Ensemble daily MAE | Nearest holiday | Distance |
@@ -323,32 +366,44 @@ close the Dec 23 gap alone — some of that day's error is likely seasonal, addr
 not at all, given only one year of data to learn a season transition from).
 
 **Action:** add `days_to_next_holiday` and `days_since_last_holiday` (clipped to e.g. ±3), and/or `is_holiday_adjacent`. Cheap, leakage-free (the holiday calendar is known in advance — genuinely available at forecast time).
-**Expected impact:** directly attacks the tail errors that dominate RMSE; may not move MAPE much but should cut the worst days — expect a cleaner win on Nov 26/28 than on Dec 23, per the confound above.
+**Actual result (§9.3, full re-run):** the target spikes improved as predicted — Dec 23 Ensemble
+daily MAE **253.8→172.0 MW (−32%)**, Nov 26 **247.7→204.9 MW (−17%)**. Prediction about *which* spike
+would improve more was backwards (Dec 23 improved more, not Nov 26), so the seasonal-confound theory
+from §3/§9.1 didn't play out as expected — worth noting as a place where a plausible hypothesis
+didn't hold, rather than quietly dropping it. **Side effect, not predicted:** XGBoost's overall test
+MAPE improved to a new best (7.35%→6.75%) while the DNN's got worse (7.01%→7.32%) — see §9.3 for
+the full breakdown and the resulting change to ensemble-weighting priority.
 
 ### P2 — Prune dead features (simplify + reduce variance)
 **Evidence:** bottom of the importance chart: `hidro_mw`, `is_holiday`, `hidro_fraction_L24`, `hidro_anomaly_L24`, `residual_L48`, `temperature`, `irradiance_diffuse`, `eolica_mw` all contribute < ~0.01 gain each. Also `hour`/`hour_sin`/`hour_cos` triple-encode the same signal for XGBoost.
 **Action:** ablation run with the bottom ~6 features removed (keep the calendar encodings for the DNN — cyclic features matter there even if trees ignore them; consider *separate* feature lists per model).
 **Expected impact:** small accuracy change either way, but a leaner model, faster rolling loop, and a clean "feature ablation" subsection for the thesis. If accuracy holds, keep the pruned set.
 
-### Recommended order after the v26.5 run (read this first)
+### Recommended order — UPDATED after P1 (read this first; supersedes the v26.5-era order below)
 
-The full run confirmed one thing that changes the priority order: **XGBoost's overfit gap (2.82 pp)
-is ~4× the DNN's (0.73 pp), while their test MAPEs are almost identical (7.35% vs 7.01%).** That is
-the single most actionable fact in this roadmap — XGBoost has real headroom that's cheap to try to
-recover, before reaching for new features at all. Updated order:
+**P1 is implemented and its result is now known (§9.3) — this changes the next step.** P1 delivered
+exactly what it targeted (Dec 23 / Nov 26 daily MAE down 32%/17%) but had an uneven effect on the
+two base models: XGBoost improved to a new best (6.75% MAPE), the DNN got worse (7.32%). The flat
+50/50 Ensemble is now mixed rather than a clean win, because it's averaging a stronger model with a
+weaker one. Updated order:
 
-1. **P5 (XGBoost regularization sweep)** — promoted to first. The 2.82 pp gap is now a *measured*
-   target, not a guess. If XGBoost's test MAPE improves even slightly while the gap narrows, the
-   ensemble (which currently drags XGBoost's weaker generalization into a flat 50/50 average)
-   improves for free too.
-2. **Weighted ensemble (new, minor extension of P3)** — trivial to try alongside P5: since DNN
-   generalizes better, an ensemble weight favoring DNN (e.g. 0.6·DNN + 0.4·XGB, tuned only on the
-   validation tail, never on test) may beat the current flat 50/50. Almost zero cost — same stored
-   forecasts, just a different scalar.
-3. **P1 (holiday-proximity features)** — still the best lever for the *tail* errors specifically
-   (the Dec 23 / Nov 26 spike days — see §10 P1 for exact dates), which neither P5 nor re-weighting
-   addresses. Do this once the
-   regularization/weighting quick wins are banked, so its effect is measured on a cleaner baseline.
+1. **Weighted ensemble, XGBoost-favored (was #2, now #1 — direction flipped)**: try a weight like
+   0.6·XGB + 0.4·DNN (tune only on the validation tail, never on test). Before P1, the DNN was the
+   stronger generalizer, so the original recommendation favored DNN; **P1 flipped which model is
+   stronger**, so the weight should flip too. Near-zero cost — same stored forecasts.
+2. **P5 (XGBoost regularization sweep)** — still valuable, but re-check the overfit gap first:
+   post-P1 it's **3.24 pp**, slightly *larger* than pre-P1 (2.82 pp), even though XGBoost's test
+   MAPE improved. That's a model fitting harder AND generalizing better at the same time — the
+   regularization sweep's job now is to see if some of that harder fit is still excess, without
+   giving back the P1 gain.
+3. **Investigate the DNN regression** — new item. Understand *why* the DNN got worse with 2
+   additional features it should have been able to ignore if they weren't useful (a plain neural
+   net doesn't have XGBoost's structural resistance to a noisy or oddly-scaled column). Candidates
+   worth checking: whether `days_to_next_holiday`/`days_since_last_holiday` interact badly with
+   `StandardScaler` (a feature that's `3` most of the time with occasional dips to 0 may not scale
+   cleanly), or whether it's within normal run-to-run DNN variance (§7.3) and a re-run would show
+   it was partly noise. Do this before adding more features, since it could affect how future
+   features are scaled/encoded for the DNN specifically.
 4. **P2 (feature pruning)** — do after P5, not before: a regularization sweep may already reduce
    XGBoost's effective reliance on the near-zero-importance features, so pruning them explicitly
    afterward is a cleaner ablation with less confounding.
@@ -356,13 +411,15 @@ recover, before reaching for new features at all. Updated order:
    still lower priority than the four above.
 
 **Discipline reminder (unchanged from before):** one change at a time, re-run, record the delta in
-§8 before moving to the next item. Do not batch P5 and P1 into one run — you won't be able to tell
-which one moved the number.
+§8 before moving to the next item. Don't batch two model/weighting changes into one run — you
+won't be able to tell which one moved the number.
 
 ### P3 — Simple ensemble: average DNN + XGBoost ✅ IMPLEMENTED & CONFIRMED TWICE (see §8 row 9, §9.1)
 **Evidence:** the two models' error bursts don't fully coincide in the plots (different hours miss differently); their test MAPEs are within 0.3 pp of each other — the classic setup where a 50/50 average beats both.
 **Action:** `pred_ens = 0.5*pred_dnn + 0.5*pred_xgb` on the stored `forecasts` DataFrames — zero retraining needed, one cell.
-**Result:** confirmed on two separate runs — Ensemble MAPE 6.88–6.89% (vs DNN 7.01–7.02%, XGB 7.31–7.35%), winning on WAPE, MAE, **and RMSE** both times, so the improvement isn't just average-case, it holds on the worst days too. **This is the best model; treat it as the baseline for P1/P4 going forward** (i.e. once holiday/ramp features are added, re-run the ensemble on the new DNN+XGB forecasts too, don't just compare the new features against the old single models). **Next refinement:** try a non-50/50 weight (see recommended order above) — the DNN's much smaller overfit gap suggests it may deserve more than half the weight.
+**Result:** confirmed on two separate runs — Ensemble MAPE 6.88–6.89% (vs DNN 7.01–7.02%, XGB 7.31–7.35%), winning on WAPE, MAE, **and RMSE** both times, so the improvement isn't just average-case, it holds on the worst days too. **This is the best model; treat it as the baseline for P1/P4 going forward** (i.e. once holiday/ramp features are added, re-run the ensemble on the new DNN+XGB forecasts too, don't just compare the new features against the old single models). **Next refinement (updated post-P1):** try a non-50/50 weight favoring **XGBoost**, not the DNN —
+P1 (§9.3) reversed which model generalizes better, so the direction of this refinement flipped too.
+See the "Recommended order" at the top of this section.
 
 ### P4 — Ramp/persistence-error features (targets the systematic lag)
 **Evidence:** the 7-day zoom shows both models trailing fast ramps — over-reliance on `demanda_residual` (importance ~0.29 = persistence anchor).
