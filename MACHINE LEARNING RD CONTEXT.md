@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.9 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | P1 tried, evaluated, and reverted by user request — see §8 row 16
+**Version:** v26.10 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | P5 (XGBoost sweep) applied — new best result 6.78% MAPE; weighted ensemble tried, did not beat flat 0.5/0.5 — see §9.2, §8 row 17
 
 > **Standing rule:** the Renewables.ninja download code (geocoding prompt, token, API calls) is
 > owned by the user — **do not modify it** without explicit instruction. See §8 row 10.
@@ -13,7 +13,7 @@
 - **Problem:** day-ahead (h+24) residual demand forecasting for Panama, DNN vs XGBoost, expanding-window rolling validation.
 - **Inputs are CSV, not Excel/Parquet.** `DEM2025.csv` (wide, `H1`..`H24`) and `solar_eolica_hidro_horario_2025.csv` (long). See §1.
 - **Two known limitations baked into the methodology** (not bugs, but must be disclosed in the thesis): perfect-foresight h+24 weather, and a previously-leaky hydro baseline that has since been fixed. See §7.
-- **§9 has the confirmed post-leakage-fix results** (DNN 7.02% / XGB 7.31% MAPE, MAE ~70 MW) — the fix slightly *improved* accuracy while making the methodology honest. The pre-fix numbers are kept for comparison.
+- **Current best result: Ensemble (0.5·DNN + 0.5·XGB) at 6.78% MAPE / 94.3 MW RMSE** (§9.2, v26.10), after applying P5's XGBoost regularization sweep. §9.1 has the post-leakage-fix baseline before P5 (DNN 7.02% / XGB 7.31% MAPE) for comparison — the leakage fix slightly *improved* accuracy while making the methodology honest.
 - **§10 is the optimization roadmap** — prioritized, evidence-based ideas to boost precision, derived from the post-fix feature-importance and error plots. Implement top-down; each item states its expected payoff and risk.
 - Full history of what went wrong and what was fixed is in **§8 Fixes Log** — check it before "discovering" an issue that's already been handled. **§11 has revert instructions** (git commits) if any change needs to be undone.
 
@@ -242,6 +242,8 @@ bit-reproducibility is ever required, try `tf.config.experimental.enable_op_dete
 | 13 | Doc incorrectly stated Panama's wet season as "Jan–Oct" and dry season as "Nov–Dec onset" | §3 Training/Test Dates, §9.1 seasonal-shift explanation, §10 P1, README limitations | **Corrected per user:** dry/summer season = **Dec–Apr**, rainy/wet season = **May–Nov**. This means training (mid-Jan–Oct) is mostly wet season (not purely as before), and the wet→dry transition happens **mid-way through the test window** (Nov = wet, Dec = new dry onset), not before it. Narrows the distributional-shift story to the December portion of test, and flags a possible confound between the Nov 28 (in-season) vs Dec 25 (new-season) error spikes in P1 | ✅ Corrected per direct user input |
 | 14 | §10 P1's spike dates ("Nov 26–28 / Dec 22–25") were read off a plot, not computed — imprecise | Scratch re-run, exported daily/hourly error CSVs | Re-ran the pipeline with a per-day/per-hour error export and cross-referenced the exact top-10 worst days against the user's full 2025 holiday list. **Confirmed:** the two worst days (Dec 23, Nov 26) are 1–2 days *before* a major holiday (Dec 24/25, Nov 28) — not on the holiday itself — and 7 of the top 10 worst days sit within 0–2 days of a holiday. Confirms the P1 hypothesis with real dates instead of an approximate window; also confirms Dec 23 (new dry season) is worse than Nov 26 (in-season), consistent with the seasonal confound in row 13 | ✅ Confirmed with exact dates — see §10 P1 |
 | 15 | **P1 was implemented, unit-tested, adversarially reviewed, and fully executed** (`days_to_next_holiday`/`days_since_last_holiday`, 30→32 features) — full results were recorded, then **the user asked to revert it**. Target result had worked (Dec 23/Nov 26 daily MAE down 32%/17%), but XGBoost improved while the DNN got worse across all four metrics, leaving the flat-weight Ensemble mixed rather than a clean win | Feature engineering block, `cols_order`, feature-count assertion, EDA plot layout — both `.py`/`.ipynb`; this doc; README | Reverted via `git revert --no-commit` over the 3-commit range (implementation, review-fix, results), applied as one changeset. All files confirmed back to the exact pre-P1 (v26.7) state: 30-feature assertion, `layout=(16,2)` plot restored, zero `days_to_next_holiday`/`days_since_last_holiday` references left in code. **The original commits remain in git history and are fully un-revertable** if this decision changes — see §11 for the exact commit hashes | ✅ Reverted per user request — code state matches v26.7; this doc kept as v26.9 to record that the attempt happened |
+| 16 | **Self-caught leakage bug in a not-yet-run design.** First draft of both P5 (XGBoost sweep) and the weighted-ensemble weight search used the LAST rolling window's (`T_last`) internal validation split for tuning. Caught during unit-test-writing (before any pipeline execution) that `T_last`'s training window overlaps 98.3% of the reported test period's rows — tuning against it would leak actual test-period outcomes into hyperparameter/weight selection | P5 sweep block and weighted-ensemble block, both `.py`/`.ipynb` — caught before the buggy version was ever committed or run | Redesigned to use `T` (the first, smallest window) instead — its validation slice is provably entirely before the test period starts. Verified with a standalone unit test that reproduces both the leak (rejected `T_last` design) and its absence (shipped `T` design) side by side, so the fix is demonstrated, not just asserted | ✅ Caught and fixed pre-execution; see §9.2 for the full story and §8 row 17 for the adversarial review that independently confirmed the fix |
+| 17 | **P5 (XGBoost regularization sweep) and weighted ensemble implemented, unit-tested, adversarially reviewed, and executed** (v26.10) | Rolling loop's `XGBRegressor(...)` call (P5); new weighted-ensemble block before `_summary_rows` (both `.py`/`.ipynb`) | Full re-run: XGBoost improved on all 4 metrics (7.35%→7.10% MAPE), pulling the flat Ensemble to a new best **6.78% MAPE**. The weighted ensemble (validation-tuned, leakage-free — see row 16) chose w=0.30 but did NOT beat the flat 0.5/0.5 on the actual test set — reported as an honest negative result, not hidden. Adversarial review confirmed all 6 checked points clean (no leakage, correct row/scaling alignment, `.py`/`.ipynb` parity, nothing downstream broken, sweep baseline sanity) and flagged two **pre-existing, out-of-scope** observations (the `T`-window validation slice was already used internally by each model's own early stopping; `rebuild_hidro_profile_features` at `T=7000` includes the validation rows in its own fitting) — both inherited from the original rolling-loop design, not introduced by this change, noted here for completeness | ✅ P5 recommended to keep (clean win — see §9.2); weighted ensemble recommended to keep flat 0.5/0.5 as primary, weighted row as documented comparison — see §11 for independent revert commands for either piece |
 
 **How this file stays useful:** when something in the notebook/script turns out wrong or gets fixed, add a row here rather than just fixing it silently — that's what makes this doc worth reading before starting new work on the pipeline.
 
@@ -278,7 +280,61 @@ split note already predicted (wet-season training vs dry-season test). **This re
 optimization roadmap: XGBoost has headroom to close via regularization, not just feature
 engineering — see §10's re-prioritization below.**
 
-### 9.2 Historical results — PRE-leakage-fix (v25, keep for comparison, do not cite as current)
+### 9.2 P5 (XGBoost regularization sweep) + weighted ensemble — v26.10
+
+Both implemented in one pipeline run (they share the same rolling loops), but **fully
+independently attributable and independently revertible** — see §11 for exact commit hashes
+and per-change revert commands.
+
+**Design correction made *before* running anything, worth recording as its own lesson:** the
+first draft of both the sweep and the weight search used the **last** rolling window's (`T_last`)
+internal validation split for tuning. Caught during unit-testing that this was a leakage bug:
+`T_last`'s training window (`[0, T_last)`) extends deep into calendar dates that overlap the
+reported 58-day test period (`[T, T+n_test_hours)`) — an artifact of the expanding-window design,
+where by the final iteration most of the "test" dates from earlier iterations have become
+training data for the last one. Concretely: `T_last`'s validation slice `[7531, 8368)` overlaps
+1368 of 1392 test rows (98.3%) — using it would have let the sweep/weight choice be informed by
+actual outcomes on almost the entire test period before that same period was "graded." **Fixed to
+use `T` (the first, smallest window) instead** — its validation slice `[6300, 7000)` is provably
+entirely before the test period starts, guaranteeing zero date overlap. Verified with a standalone
+unit test that explicitly reproduces both the leak (rejected design) and its absence (shipped
+design), and confirmed structurally correct by an independent adversarial review (see §8 row 17).
+
+| Model | MAPE | WAPE | MAE (MW) | RMSE (MW) | Δ vs pre-P5 baseline (MAPE) |
+|---|---|---|---|---|---|
+| DNN | 7.01% | 6.11% | 69.7 | 96.6 | unchanged (P5/weighting don't touch DNN training) |
+| XGBoost (P5-tuned) | **7.10%** | **6.07%** | **69.3** | **99.2** | **better by 0.25 pp**, all 4 metrics improved |
+| **Ensemble (0.5/0.5)** | **6.78%** | **5.83%** | **66.5** | **94.3** | **better by 0.11 pp — new best result overall** |
+| Weighted Ensemble (w=0.30 DNN / 0.70 XGB) | 6.84% | 5.87% | 66.9 | 95.4 | worse than flat 0.5/0.5 on every metric |
+| Naive | 11.57% | 10.17% | 116.0 | 165.0 | — |
+
+*(Pre-P5 baseline for comparison: XGBoost 7.35%/6.20%/70.7/102.3, Ensemble 6.89%/5.88%/67.1/95.5
+— the same scratch-environment re-run methodology as this run, from the row directly above.)*
+
+**P5 — clean, unambiguous win.** The sweep (grid searched on the `T`-window validation slice
+only) selected `max_depth=4, min_child_weight=5, reg_alpha=0.3, reg_lambda=2.0, subsample=0.8,
+colsample_bytree=0.8` over the original `max_depth=5, min_child_weight=1 (default), reg_alpha=0.1,
+reg_lambda=1.0` — lower validation MAPE (4.658% vs 4.680%) **and** a much smaller validation
+train/val gap (0.694 pp vs 1.299 pp), i.e. more conservative trees. Applied across all 58
+iterations, this improved XGBoost on **all four** test metrics, which pulled the flat Ensemble to
+**6.78% MAPE — the best result recorded anywhere in this project**, beating even the P1 attempt
+(§9's prior "P1 results" entry, since reverted). **Recommendation: keep P5.**
+
+**Weighted ensemble — an honest negative result, not a bug.** The validation-based search chose
+w=0.30 (favor XGBoost 70/30), correctly minimizing validation WAPE (0.0432 at w=0.30 vs 0.0464 at
+w=1.00 pure-DNN) — the search itself worked exactly as designed and was confirmed leakage-free.
+But on the **actual test set**, the flat 50/50 average still wins on every metric. The most likely
+explanation: the validation window (`T`'s tail, an earlier calendar period entirely before the
+test window by construction) sits in a different part of the year than the test period, so
+"which model was relatively more accurate there" isn't a reliable guide to "which model will be
+more accurate on Nov–Dec data" — a validation/test mismatch under the same wet→dry seasonal shift
+already documented in §3. This is a legitimate, documented finding worth keeping in the thesis
+(it illustrates a real limitation of naive validation-based ensemble weighting under distribution
+shift) even though the specific refinement it produced doesn't beat what was already the best
+model. **Recommendation: keep the flat 0.5/0.5 Ensemble as the primary reported model; keep the
+Weighted Ensemble row in the code as a documented comparison point, or revert it — see §11.**
+
+### 9.3 Historical results — PRE-leakage-fix (v25, keep for comparison, do not cite as current)
 
 | Model | Test MAPE | Test WAPE | Test sMAPE | R² | Overfit |
 |---|---|---|---|---|---|
@@ -331,49 +387,47 @@ not at all, given only one year of data to learn a season transition from).
 **Action:** ablation run with the bottom ~6 features removed (keep the calendar encodings for the DNN — cyclic features matter there even if trees ignore them; consider *separate* feature lists per model).
 **Expected impact:** small accuracy change either way, but a leaner model, faster rolling loop, and a clean "feature ablation" subsection for the thesis. If accuracy holds, keep the pruned set.
 
-### Recommended order after the v26.5 run (read this first)
+### Recommended order — UPDATED after P5 + weighted ensemble (v26.10, read this first)
 
-The full run confirmed one thing that changes the priority order: **XGBoost's overfit gap (2.82 pp)
-is ~4× the DNN's (0.73 pp), while their test MAPEs are almost identical (7.35% vs 7.01%).** That is
-the single most actionable fact in this roadmap — XGBoost has real headroom that's cheap to try to
-recover, before reaching for new features at all. Updated order:
+**Current best: Ensemble (0.5·DNN + 0.5·XGB) at 6.78% MAPE / 94.3 MW RMSE (§9.2).** P5 is done and
+was a clean win; the weighted-ensemble refinement was tried properly (leakage-free, see §8 row 16)
+but didn't beat the flat 0.5/0.5, so flat remains the primary reported model. Updated order:
 
-1. **P5 (XGBoost regularization sweep)** — promoted to first. The 2.82 pp gap is now a *measured*
-   target, not a guess. If XGBoost's test MAPE improves even slightly while the gap narrows, the
-   ensemble (which currently drags XGBoost's weaker generalization into a flat 50/50 average)
-   improves for free too.
-2. **Weighted ensemble (new, minor extension of P3)** — trivial to try alongside P5: since DNN
-   generalizes better, an ensemble weight favoring DNN (e.g. 0.6·DNN + 0.4·XGB, tuned only on the
-   validation tail, never on test) may beat the current flat 50/50. Almost zero cost — same stored
-   forecasts, just a different scalar.
-3. **P1 (holiday-proximity features)** — still the best lever for the *tail* errors specifically
-   (the Dec 23 / Nov 26 spike days — see §10 P1 for exact dates), which neither P5 nor re-weighting
-   addresses. Do this once the
-   regularization/weighting quick wins are banked, so its effect is measured on a cleaner baseline.
-4. **P2 (feature pruning)** — do after P5, not before: a regularization sweep may already reduce
-   XGBoost's effective reliance on the near-zero-importance features, so pruning them explicitly
-   afterward is a cleaner ablation with less confounding.
-5. Everything else (P4 ramp features, P6 quantile/Huber loss, P7 pipeline cleanup) unchanged —
-   still lower priority than the four above.
+1. **P1 (holiday-proximity features) — reconsider now, against the NEW baseline.** P1 was tried
+   earlier against the pre-P5 baseline and reverted (mixed DNN/XGBoost effect — §8 row 15). XGBoost
+   is now a different, better-regularized model (P5-tuned), so P1's effect on it may differ. If
+   retried, compare against 6.78% MAPE, not the old 6.89%/6.89% numbers.
+2. **P2 (feature pruning)** — do this next if not P1. XGBoost is now more regularized (P5), which
+   may have already reduced its reliance on near-zero-importance features — pruning them explicitly
+   is a cleaner ablation now than before P5.
+3. **P4 (ramp/persistence-error features)** — unchanged priority, still targets the systematic lag
+   visible in the 7-day zoom plots.
+4. **P6 (quantile/Huber loss)** — unchanged; strong thesis value (uncertainty bands) but the
+   biggest methodological lift of the remaining items.
+5. **P7 (pipeline cleanup)** — no accuracy impact, do whenever convenient.
 
 **Discipline reminder (unchanged from before):** one change at a time, re-run, record the delta in
-§8 before moving to the next item. Do not batch P5 and P1 into one run — you won't be able to tell
-which one moved the number.
+§8 before moving to the next item.
 
-### P3 — Simple ensemble: average DNN + XGBoost ✅ IMPLEMENTED & CONFIRMED TWICE (see §8 row 9, §9.1)
+### P3 — Simple ensemble: average DNN + XGBoost ✅ IMPLEMENTED & CONFIRMED THREE TIMES (see §8 rows 9, 17; §9.1, §9.2)
 **Evidence:** the two models' error bursts don't fully coincide in the plots (different hours miss differently); their test MAPEs are within 0.3 pp of each other — the classic setup where a 50/50 average beats both.
 **Action:** `pred_ens = 0.5*pred_dnn + 0.5*pred_xgb` on the stored `forecasts` DataFrames — zero retraining needed, one cell.
-**Result:** confirmed on two separate runs — Ensemble MAPE 6.88–6.89% (vs DNN 7.01–7.02%, XGB 7.31–7.35%), winning on WAPE, MAE, **and RMSE** both times, so the improvement isn't just average-case, it holds on the worst days too. **This is the best model; treat it as the baseline for P1/P4 going forward** (i.e. once holiday/ramp features are added, re-run the ensemble on the new DNN+XGB forecasts too, don't just compare the new features against the old single models). **Next refinement:** try a non-50/50 weight (see recommended order above) — the DNN's much smaller overfit gap suggests it may deserve more than half the weight.
+**Result:** confirmed on three separate runs, now including post-P5: Ensemble MAPE 6.78–6.89% across runs (vs DNN 7.01–7.02%, XGB 7.10–7.35%), winning on WAPE, MAE, **and RMSE** every time. **This is the best model.** A weighted (non-50/50) refinement was tried properly — see the "weighted ensemble" entry below — and did NOT beat the flat average on the real test set, so flat 0.5/0.5 stays the recommendation.
+
+### Weighted ensemble — ✅ IMPLEMENTED, TESTED, EXECUTED — did not beat flat 0.5/0.5 (see §8 rows 16–17, §9.2)
+**Evidence:** DNN's overfit gap was much smaller than XGBoost's pre-P5 (0.73 pp vs 2.82 pp), suggesting it might deserve more ensemble weight than a flat 50/50.
+**Action:** search w in {0.0, 0.05, ..., 1.0} minimizing **validation** WAPE (never test — see §8 row 16 for the leakage bug this caught and fixed before running), using the first rolling window's (`T`) held-out validation slice. Apply the fixed winning weight to the full 58-day test forecasts.
+**Result:** search correctly picked w=0.30 (favor XGBoost) on the validation slice, but on the actual test set the flat 0.5/0.5 still wins on every metric (6.78% vs 6.84% MAPE). Likely cause: the validation window sits in a different season than the test window (§3's wet→dry shift), so relative model skill there doesn't transfer. **Recommendation: keep flat 0.5/0.5 as the primary model; keep this as a documented negative finding, or revert the code — see §11.**
 
 ### P4 — Ramp/persistence-error features (targets the systematic lag)
 **Evidence:** the 7-day zoom shows both models trailing fast ramps — over-reliance on `demanda_residual` (importance ~0.29 = persistence anchor).
 **Action:** add `residual_delta_3h = residual(t) − residual(t−3)` and yesterday's persistence error `naive_error_L24 = residual(t−24) − residual(t−48)`-style features (all backward-looking → leakage-free).
 **Expected impact:** helps the model anticipate ramps instead of following them one step late.
 
-### P5 — XGBoost hyperparameter sweep ⭐ PROMOTED TO TOP PRIORITY (see recommended order above)
+### P5 — XGBoost hyperparameter sweep ✅ IMPLEMENTED, TESTED, EXECUTED — clean win (see §8 rows 16–17, §9.2)
 **Evidence:** confirmed by direct execution (v26.5, §9.1) — XGBoost overfit gap is **2.82 pp** (train 4.54% → test 7.35%), vs the DNN's **0.73 pp** (train 6.28% → test 7.01%). Nearly identical test MAPE, very different generalization — XGBoost is fitting training noise the DNN isn't. This is a measured, not assumed, target.
-**Action:** small grid around the current config on the *validation* tail only: `max_depth ∈ {4,5,6}` (lower = less overfit), `learning_rate ∈ {0.02,0.03,0.05}`, `min_child_weight ∈ {1,5,10}` (higher = more conservative splits), `reg_alpha`/`reg_lambda` a notch higher than the current 0.1/1.0, `subsample`/`colsample_bytree ∈ {0.7,0.8,0.9}`. Never tune on the test window — that would leak the test set into model selection.
-**Expected impact:** closing even half the gap (2.82 → ~1.4 pp) without hurting test MAPE would be a genuine, cheap win — and it directly strengthens the ensemble too, since a less-overfit XGBoost is a better ensemble partner for the already-strong DNN.
+**Action:** small grid (6 candidates including the original config as baseline) searched on the **first rolling window's (`T`) validation slice only** — deliberately not `T_last`, whose training window overlaps the test period; see §8 row 16 for the leakage bug this avoided. Varied `max_depth`, `min_child_weight`, `reg_alpha`, `reg_lambda`, `subsample`, `colsample_bytree`. Winning config applied fixed across all 58 rolling iterations.
+**Result:** selected `max_depth=4, min_child_weight=5, reg_alpha=0.3, reg_lambda=2.0, subsample=0.8, colsample_bytree=0.8` over the original `max_depth=5, min_child_weight=1(default), reg_alpha=0.1, reg_lambda=1.0` — lower validation MAPE (4.658% vs 4.680%) and a much smaller train/val gap (0.694 pp vs 1.299 pp). On the full test period: XGBoost improved on **all four metrics** (MAPE 7.35%→7.10%, WAPE 6.20%→6.07%, MAE 70.7→69.3 MW, RMSE 102.3→99.2 MW), pulling the flat Ensemble to **6.78% MAPE — the best result in this project.** **Recommendation: keep.**
 
 ### P6 — Quantile/pinball or Huber loss (robustness to spike days)
 **Evidence:** the error distribution is spiky (a few ~400–500 MW days vs 70 MW MAE) — squared-error training over-weights those days at the expense of typical days.
@@ -400,6 +454,12 @@ All changes land as focused git commits on branch `claude/RDMACHINELEARNING` (re
 | `71f7120` | This reference doc reorganized v25→v26 (TL;DR, Limitations, Fixes Log) | `git revert 71f7120` |
 | `5d5d745`, `df4a3d9`, `a3b3e95` | **P1 holiday-proximity features** — implemented, review-fixed, results recorded (32 features, DNN worse / XGBoost better / target spikes down 32%/17%) | Already reverted (see next row). To **re-apply** P1: `git revert 782daa3` (undoes the revert) |
 | `782daa3` | **Reverted P1** per user request — restores the exact pre-P1 (v26.7) code and doc state | `git revert 782daa3` to bring P1 back (equivalent to re-applying the three commits above) |
+| `d473e98` | **P5 (XGBoost sweep) + weighted ensemble** — both implemented together in one commit since they share one pipeline run. Result: P5 is a clean win (new best 6.78% MAPE); weighted ensemble is a documented negative result (didn't beat flat 0.5/0.5) | See below — **full vs. partial revert** |
 | *latest on this file* | v26.1+: post-fix results, §10 roadmap, this revert table, plus all rows above | Find it with `git log --oneline -- "MACHINE LEARNING RD CONTEXT.md"`, then `git revert <hash>` |
+
+**Reverting `d473e98` (P5 + weighted ensemble) — two options, since they're one commit but you may only want to undo one:**
+
+- **Revert both:** `git revert d473e98` — one command, clean, restores the exact pre-P5 state (XGBoost back to the original hardcoded hyperparameters, no weighted-ensemble row). Do this if you don't want either change.
+- **Keep P5, drop only the weighted ensemble:** `git revert` operates on whole commits, so this needs a small manual follow-up edit rather than one command — ask me (or a future session) to "remove the weighted-ensemble block, keep the P5 sweep" and I'll delete just that section from both `.py`/`.ipynb` (it's self-contained: one block before `_summary_rows`, plus removing its row from the results dict) and commit that as a new, separate, revertible change. This is the recommended option given the results in §9.2 (P5 = keep, weighted ensemble = keep as documented finding or drop, your call).
 
 To reproduce the **pre-fix (v25) numbers** for a thesis comparison table: `git stash && git checkout 698be5f~1 -- MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb`, re-run, then `git checkout HEAD -- MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb && git stash pop`. (Or simply cite §9.2 — the pre-fix numbers are preserved there.)

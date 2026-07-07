@@ -67,10 +67,13 @@ is the intended entry point.
 ### 5. Expected output
 
 - Rolling day-ahead forecast plots (actual vs forecast, 7-day zoom, absolute error) for DNN and XGBoost.
-- XGBoost feature-importance chart (gain).
+- An XGBoost hyperparameter sweep (validation-only, before the main loop), followed by the XGBoost
+  feature-importance chart (gain) using the tuned config.
 - Naive persistence benchmark and per-model selection (must beat naive; overfit gap < 10 pp).
-- A final **results table** reporting, per model (DNN, XGBoost, **Ensemble**, Naive), both relative
-  error (**MAPE %**, **WAPE %**) and absolute error in MW (**MAE**, **RMSE**).
+- A final **results table** reporting, per model (DNN, XGBoost, **Ensemble (0.5/0.5)**,
+  **Weighted Ensemble**, Naive), both relative error (**MAPE %**, **WAPE %**) and absolute error
+  in MW (**MAE**, **RMSE**). The flat 0.5/0.5 Ensemble is the recommended model — see
+  `MACHINE LEARNING RD CONTEXT.md` §9.2 for why the weighted variant is included but not preferred.
 
 ## Assumptions & limitations
 
