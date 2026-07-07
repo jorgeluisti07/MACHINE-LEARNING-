@@ -1445,65 +1445,18 @@ _pred_xgb = forecasts['xgboost'][target_h24].iloc[T:T + n_test_hours].values.ast
 # Ensemble (roadmap P3): unweighted mean of the two models' stored forecasts.
 # No retraining involved — the DNN and XGBoost miss on different hours, so
 # averaging tends to cancel part of each model's error.
+#
+# A validation-tuned WEIGHTED variant (search w minimizing validation WAPE, leakage-free —
+# see MACHINE LEARNING RD CONTEXT.md sections 8 and 9.2) was tried and removed: the search
+# correctly picked w=0.30 (favor XGBoost) on validation data, but that weight did not beat
+# this flat 0.5/0.5 average on the actual test set. Kept the simpler, better-performing
+# version; the negative result is documented in CONTEXT.md rather than carried in code.
 _pred_ens = 0.5 * (_pred_dnn + _pred_xgb)
-
-# ────────────────────────────────────────────────────────────────────────────
-# Weighted ensemble (roadmap: weighted-ensemble refinement of P3)
-# The flat 0.5/0.5 ensemble above treats both models equally. Here the weight is chosen by
-# searching for the w that minimises VALIDATION WAPE — using the FIRST rolling iteration's
-# models (T, not T_last) predicting on their own held-out validation slice (the tail of the
-# ORIGINAL training window, entirely before row T where the test period starts). T_last's
-# training window was deliberately avoided: its rows extend deep into calendar dates that are
-# later reported as test-period performance (an expanding-window artifact), so tuning against
-# T_last's validation slice would let the weight choice be informed by actual outcomes on some
-# of the very dates later graded in the results table — leakage into model selection, even
-# though the forecasts themselves stay leakage-free either way. Using T's validation slice
-# guarantees zero date overlap with the reported 58-day test period.
-# ────────────────────────────────────────────────────────────────────────────
-
-_X_train_dnn_first = globals()['X_train_dnn' + str(T)]
-_scaler_y_first     = globals()['scaler_y_dnn' + str(T)]
-_model_dnn_first    = globals()['model_dnn'    + str(T)]
-_model_xgb_first    = globals()['model_xgb'    + str(T)]
-_X_train_xgb_first  = globals()['X_train_xgb'  + str(T)]
-
-_val_size_w = max(24, round(len(_X_train_xgb_first) * 0.10))
-# Same val_size formula as both rolling loops, applied to the first (T) window only.
-
-_X_val_dnn_w    = _X_train_dnn_first.iloc[-_val_size_w:]
-_X_val_xgb_w    = _X_train_xgb_first.iloc[-_val_size_w:]
-_y_val_actual_w = df[target_h24].iloc[T - _val_size_w:T].values
-# df's row order is the same trimmed, reset-index dataframe every get_targets_features() call
-# slices from, so this range lines up with X_train_*_first.iloc[-_val_size_w:] row-for-row.
-# T - _val_size_w : T is entirely < T, i.e. strictly before the test period starts at row T.
-
-_pred_val_dnn = _scaler_y_first.inverse_transform(
-    _model_dnn_first.predict(_X_val_dnn_w, verbose=0)
-).ravel()
-_pred_val_xgb = _model_xgb_first.predict(_X_val_xgb_w)
-
-_weights = np.arange(0.0, 1.01, 0.05)
-_val_wape_by_w = [
-    np.sum(np.abs(_y_val_actual_w - (w * _pred_val_dnn + (1 - w) * _pred_val_xgb)))
-    / (np.sum(np.abs(_y_val_actual_w)) + 1e-8)
-    for w in _weights
-]
-BEST_ENSEMBLE_WEIGHT = float(_weights[int(np.argmin(_val_wape_by_w))])
-# w = weight on the DNN; (1 - w) on XGBoost.
-
-print('Ensemble weight search (validation WAPE, T window — before the test period, w = DNN weight):')
-for w, wape in zip(_weights, _val_wape_by_w):
-    marker = '  <-- selected' if abs(w - BEST_ENSEMBLE_WEIGHT) < 1e-9 else ''
-    print(f'  w={w:.2f}: val WAPE={wape:.4f}{marker}')
-print(f'Selected weight: w={BEST_ENSEMBLE_WEIGHT:.2f} (DNN) / {1 - BEST_ENSEMBLE_WEIGHT:.2f} (XGBoost)')
-
-_pred_ens_weighted = BEST_ENSEMBLE_WEIGHT * _pred_dnn + (1 - BEST_ENSEMBLE_WEIGHT) * _pred_xgb
 
 _summary_rows = {
     'DNN':      _pred_dnn,
     'XGBoost':  _pred_xgb,
-    'Ensemble (0.5/0.5)': _pred_ens,
-    f'Weighted Ensemble (w={BEST_ENSEMBLE_WEIGHT:.2f})': _pred_ens_weighted,
+    'Ensemble': _pred_ens,
     'Naive':    naive_preds.astype(float),
 }
 
