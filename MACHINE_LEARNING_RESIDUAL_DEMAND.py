@@ -437,22 +437,28 @@ df['demanda_residual_h24'] = df['demanda_residual'].shift(-HORIZON)
 # The value we want to predict: residual demand 24 hours ahead.
 # shift(-24) aligns each row's features with the target 24 hours later.
 
-#Final feature order: 30 flat features + 1 target
+#Final feature order: 22 flat features + 1 target (v26.12, roadmap P2 — pruned 8 near-zero-
+# importance features: is_holiday, residual_L48, hidro_fraction_L24, hidro_anomaly_L24,
+# temperature, hidro_delta_L24, wind_speed, temperature_h24 — all gain < 0.01 in the XGBoost
+# feature-importance ranking on a fresh full run. hidro_mw is KEPT despite its own near-zero
+# gain (0.0047): rebuild_hidro_profile_features() reads df_in['hidro_mw'] directly to build
+# hidro_typical_h24/hidro_anomaly_L24, so dropping it here would break that function even
+# though it isn't used directly as a model input anymore. month_sin is KEPT despite low gain
+# (0.0079) to stay paired with month_cos — splitting a cyclic sin/cos pair breaks the encoding.
 cols_order = [
-    # Current meteorology (7)
-    'irradiance_direct', 'irradiance_diffuse', 'temperature',
-    'solar_mw', 'wind_speed', 'eolica_mw', 'hidro_mw',
-    # NWP horizon covariates at t+24 (4) ← most impactful group (v22)
-    'irradiance_direct_h24', 'irradiance_diffuse_h24',
-    'temperature_h24', 'wind_speed_h24',
-    # Calendar features (11)
+    # Current meteorology (4 predictive + hidro_mw kept for the hydro-profile rebuild above)
+    'irradiance_direct', 'irradiance_diffuse',
+    'solar_mw', 'eolica_mw', 'hidro_mw',
+    # NWP horizon covariates at t+24 (3) ← most impactful group (v22)
+    'irradiance_direct_h24', 'irradiance_diffuse_h24', 'wind_speed_h24',
+    # Calendar features (10)
     'month', 'hour', 'hour_sin', 'hour_cos', 'month_sin', 'month_cos',
-    'is_weekday', 'hour_weekday', 'is_holiday', 'dow_sin', 'dow_cos',
-    # Lagged target — Lagged Approach, snn_forec (4)
+    'is_weekday', 'hour_weekday', 'dow_sin', 'dow_cos',
+    # Lagged target — Lagged Approach, snn_forec (3)
     'demanda_residual',
-    'residual_L48', 'residual_L336', 'residual_L168',
-    # Hydro dispatch state (4)
-    'hidro_fraction_L24', 'hidro_delta_L24', 'hidro_typical_h24', 'hidro_anomaly_L24',
+    'residual_L336', 'residual_L168',
+    # Hydro dispatch state (1)
+    'hidro_typical_h24',
     # Target (1)
     'demanda_residual_h24',
 ]
@@ -478,8 +484,8 @@ print(df.describe().round(2))
 # ────────────────────────────────────────────────────────────────────────────
 
 df.plot(subplots=True, figsize=(14, 42), layout=(16, 2))
-# Plot each of the 31 columns in its own sub-panel.
-# layout=(16, 2) gives 32 slots — enough for 31 columns. layout=(9, 2) would fail (only 18 slots).
+# Plot each of the 23 columns in its own sub-panel.
+# layout=(16, 2) gives 32 slots — enough for 23 columns. layout=(9, 2) would fail (only 18 slots).
 plt.tight_layout()
 plt.show()
 
@@ -544,7 +550,7 @@ with warnings.catch_warnings():
 print(stationarity)
 
 r = df.corr()
-# Compute the Pearson correlation matrix for all 31 columns.
+# Compute the Pearson correlation matrix for all 23 columns.
 
 print('Correlations with target (demanda_residual_h24):')
 print(r['demanda_residual_h24'].drop('demanda_residual_h24').sort_values(ascending=False).round(3))
@@ -620,7 +626,7 @@ target_h24   = 'demanda_residual_h24'
 
 features_h24 = [c for c in df.columns if c != target_h24]
 # List of all feature column names — every column except the target.
-# Should be exactly 30 features.
+# Should be exactly 22 features.
 
 forecasts = {
     k: pd.DataFrame(data=np.nan, columns=[target_h24], index=datetime_index)
@@ -698,7 +704,7 @@ def get_targets_features(df_in, T, scale=False):
 
     Parameters
     ----------
-    df_in  : DataFrame — the full dataset with all 30 features and the target column.
+    df_in  : DataFrame — the full dataset with all 22 features and the target column.
     T      : int       — training cutoff (number of rows used for training).
     scale  : bool      — if True, apply StandardScaler to X and Y (for DNN);
                          if False, return raw arrays (for XGBoost).
@@ -737,11 +743,11 @@ def get_targets_features(df_in, T, scale=False):
 T_test = 7000
 Y_v, X_v, Xt_v = get_targets_features(df_in=df, T=T_test)
 
-print(f'X_train: {X_v.shape}   X_test: {Xt_v.shape}   (should be (7000, 30) and (24, 30))')
+print(f'X_train: {X_v.shape}   X_test: {Xt_v.shape}   (should be (7000, 22) and (24, 22))')
 print(f'Y_train: {Y_v.shape}   (should be (7000, 1))')
 
-assert X_v.shape[1] == 30, f'Feature count error: {X_v.shape[1]}'
-# Hard assertion: the number of features must be exactly 30 as documented in the context.
+assert X_v.shape[1] == 22, f'Feature count error: {X_v.shape[1]}'
+# Hard assertion: the number of features must be exactly 22 as documented in the context.
 
 print(f'\n Shapes correct')
 print(f'\nFeature list ({len(features_h24)} features):')
@@ -1422,7 +1428,7 @@ for ax, (name, preds), color in zip(axes, all_preds.items(), ['orange', 'darkora
     # individual forecast cycles unreadable.
 
 plt.suptitle(
-    'v26 — DNN vs XGBoost | Lagged Approach | 30 Features | First 7 Test Days',
+    'v26 — DNN vs XGBoost | Lagged Approach | 22 Features | First 7 Test Days',
     fontsize=12, y=1.02)
 plt.tight_layout()
 plt.show()
