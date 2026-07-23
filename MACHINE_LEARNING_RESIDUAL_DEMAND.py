@@ -216,14 +216,24 @@ demanda_long  = demanda_long.dropna(subset=['fecha_dt'])
 # Parse dates; drop any rows where the date cannot be converted.
 
 demanda_long['hora_num'] = (
-    demanda_long['hora_str'].str.extract(r'(\d+)').astype(float).fillna(0).astype(int) - 1
+    demanda_long['hora_str'].str.extract(r'(\d+)').astype(float).fillna(0).astype(int)
 )
-# Extract the numeric part from 'H1', 'H2', … 'H24' and subtract 1 so hours run 0–23.
+# HOUR-ENDING convention (review #11, resolved 2026-07-23): ETESA labels hours by when they
+# END. The generation file runs 2025-01-01 01:00 → 2026-01-01 00:00 = exactly 8760 rows
+# (365×24), the unambiguous signature of hour-ending labeling (the first hour 00:00–01:00 is
+# stamped 01:00). The demand file's 'H1' is therefore "hora 1" = the hour ENDING at 01:00, so
+# H_k maps to k:00 — H1→01:00, …, H24→ next-day 00:00. (The previous code subtracted 1, mapping
+# H1→00:00, which put demand one hour BEFORE generation: generation's first hour then joined
+# demand's H2 instead of H1, corrupting the target demanda_residual = demanda − solar − eólica
+# by mixing two different physical hours. To revert to the old hour-beginning mapping, restore
+# the `- 1`.) NOTE (still open): the Renewables.ninja weather timestamps may follow an
+# hour-BEGINNING convention; that is a separate feature-alignment question from this target fix
+# and is left unchanged here — flagged for a future pass.
 
 demanda_long['timestamp'] = (
     demanda_long['fecha_dt'] + pd.to_timedelta(demanda_long['hora_num'], unit='h')
 )
-# Build a proper datetime timestamp by adding the hour offset to the date.
+# Build a proper datetime timestamp by adding the hour-ending offset to the date.
 
 demanda_long = demanda_long.set_index('timestamp')[['demanda_mw']].sort_index()
 demanda_long['demanda_mw'] = pd.to_numeric(demanda_long['demanda_mw'], errors='coerce')
@@ -243,26 +253,50 @@ df = df_combined
 print('Columns:', df.columns.tolist())
 
 # ────────────────────────────────────────────────────────────────────────────
-# calibration
-# The Renewables.ninja API provides MERRA-2 reanalysis data scaled to the installed capacity.
-# However, the real irradiance measured at the Panama solar plants differs from the MERRA-2 signal.
-# We calibrate the irradiance columns by computing the ratio between real ETESA solar generation
-# and the Ninja solar output and applying that ratio to all irradiance features.
-# This ensures that `irradiance_direct` and `irradiance_diffuse` reflect observed conditions
-# rather than a global reanalysis average.
+# Index integrity (review #12): every lag/shift feature below assumes "N rows back =
+# N hours back". That only holds if the hourly index is complete (no gaps) and unique
+# (no duplicate timestamps). Assert it explicitly rather than trusting row position —
+# a single missing or duplicated hour would silently make a 24-row shift ≠ 24 hours.
+_idx = pd.DatetimeIndex(df.index)
+_dupes = _idx[_idx.duplicated()]
+assert _dupes.empty, f'Duplicate timestamps in the hourly index: {list(_dupes[:5])}'
+_full = pd.date_range(_idx.min(), _idx.max(), freq='h')
+_missing = _full.difference(_idx)
+assert _missing.empty, (
+    f'{len(_missing)} missing hour(s) in the index (e.g. {list(_missing[:5])}); '
+    f'row-count-based shifts would be wrong. Reindex to a complete hourly range first.'
+)
+print(f'Index OK: {len(_idx):,} unique, gap-free hourly rows '
+      f'({_idx.min()} → {_idx.max()}).')
+
+# HOUR CONVENTION — RESOLVED (review #11, 2026-07-23): ETESA uses HOUR-ENDING labeling. The
+# generation file spans 2025-01-01 01:00 → 2026-01-01 00:00 = 8760 rows (365×24), which only
+# fits hour-ending (first hour 00:00–01:00 stamped 01:00). The demand loader above was updated
+# to match (H_k → k:00). See the demand-loading block for the full rationale and revert note.
+
+# ────────────────────────────────────────────────────────────────────────────
+# calibration — LEAKAGE-SAFE, re-fit per rolling window (review #3, 2026-07-23)
+# The Renewables.ninja MERRA-2 irradiance differs from what the real Panama plants see, so we
+# scale it by a real/ninja factor. The OLD code computed that factor as a per-hour ratio over
+# the FULL YEAR (real_solar[t] / ninja_solar[t]) and baked it into irradiance_direct/diffuse.
+# Because irradiance_*_h24[t] = irradiance_*[t+24], that made the horizon weather features
+# proportional to real_solar[t+24] — a term that DIRECTLY defines the target
+# (demanda_residual_h24 = demanda − solar − eólica at t+24). So the calibration leaked the
+# target into the inputs, on top of the already-disclosed perfect-foresight weather assumption.
+#
+# Fix: do NOT calibrate here. Keep the raw ninja irradiance + ninja solar, and re-fit the factor
+# from TRAINING ROWS ONLY inside each rolling window (rebuild_calibration_features, called by
+# get_targets_features) — a per-hour-of-day factor from real/ninja on rows < T, applied using
+# only ninja inputs, never target-hour real solar. Same discipline as the hydro profile.
 # ────────────────────────────────────────────────────────────────────────────
 
-solar_ninja  = df['solar_mw'].replace(0, np.nan)
-# The raw Ninja solar column. We replace 0 with NaN to avoid division by zero at night.
-
-ratio_calib  = (df['solar_mw_real'] / solar_ninja).fillna(1)
-# Compute the calibration ratio: real / ninja. Where ninja is NaN (night hours),
-# the ratio defaults to 1 (no correction — irradiance is zero anyway).
-
-df['irradiance_direct']  = (df['irradiance_direct']  * ratio_calib).fillna(0)
-df['irradiance_diffuse'] = (df['irradiance_diffuse'] * ratio_calib).fillna(0)
-# Scale both irradiance components by the calibration ratio.
-# At night (solar_ninja = 0) both irradiance values are zero
+# Preserve the raw (uncalibrated) ninja signals the per-window calibration needs downstream.
+df['irr_direct_ninja']  = df['irradiance_direct']
+df['irr_diffuse_ninja'] = df['irradiance_diffuse']
+df['solar_ninja']       = df['solar_mw']
+# irradiance_direct / irradiance_diffuse stay as RAW ninja here (a placeholder used only for the
+# EDA/correlation plots below); they are OVERWRITTEN per rolling window by the leakage-safe
+# calibration during modelling, so their prep-time values never reach the models directly.
 
 df['solar_mw']  = df['solar_mw_real']
 df['eolica_mw'] = df['eolica_mw_real']
@@ -272,7 +306,10 @@ df['hidro_mw']  = df['hidro_mw_real']
 
 cols_order = [
     'irradiance_direct','irradiance_diffuse','temperature',
-    'solar_mw','wind_speed','eolica_mw','hidro_mw','demanda_mw'
+    'solar_mw','wind_speed','eolica_mw','hidro_mw','demanda_mw',
+    # Raw ninja helpers kept so rebuild_calibration_features can re-fit per window (not fed to
+    # the models — see the explicit features_h24 definition, which draws from cols_order only).
+    'irr_direct_ninja','irr_diffuse_ninja','solar_ninja',
 ]
 df = df[cols_order]
 # Retain only the base columns we need. All other API columns (e.g. wind_mw from Ninja)
@@ -414,6 +451,14 @@ df['irradiance_direct_h24']  = df['irradiance_direct'].shift(-HORIZON)
 df['irradiance_diffuse_h24'] = df['irradiance_diffuse'].shift(-HORIZON)
 df['temperature_h24']        = df['temperature'].shift(-HORIZON)
 df['wind_speed_h24']         = df['wind_speed'].shift(-HORIZON)
+# Raw-ninja h+24 shifts, built here (pre-trim, so the shift has successors) and kept so the
+# per-window calibration (rebuild_calibration_features) can rebuild the two irradiance_*_h24
+# columns from ninja × a training-only factor, with no NaN at the tail. Not fed to the models.
+df['irr_direct_ninja_h24']   = df['irr_direct_ninja'].shift(-HORIZON)
+df['irr_diffuse_ninja_h24']  = df['irr_diffuse_ninja'].shift(-HORIZON)
+# NOTE: the historical "−2.35 pp from the h24 weather block" gain (comment above) predates the
+# calibration-leakage fix (#3) and is partly attributable to that leak — treat it as suspect
+# until re-measured on the corrected pipeline.
 
 # Hydro dispatch features
 # Decision (external review, 2026-07-23): hidro_mw stays in the model as a raw current-hour
@@ -476,7 +521,12 @@ cols_order = [
     # Target (1)
     'demanda_residual_h24',
 ]
-df             = df[cols_order]
+# Raw ninja helper columns retained alongside cols_order so rebuild_calibration_features can
+# re-fit the leakage-safe calibration per rolling window. They are NOT model features (features_h24
+# is defined from cols_order only, below), just inputs to the per-window rebuild.
+NINJA_HELPERS  = ['irr_direct_ninja', 'irr_diffuse_ninja', 'solar_ninja',
+                  'irr_direct_ninja_h24', 'irr_diffuse_ninja_h24']
+df             = df[cols_order + NINJA_HELPERS]
 # Trim: drop first MAX_LAG rows (NaN from lag features) and last HORIZON rows (NaN from future shift).
 df             = df.iloc[MAX_LAG:-HORIZON].reset_index(drop=True)
 datetime_index = datetime_index.iloc[MAX_LAG:-HORIZON].reset_index(drop=True)
@@ -497,8 +547,9 @@ print(df.describe().round(2))
 # plot the data
 # ────────────────────────────────────────────────────────────────────────────
 
-df.plot(subplots=True, figsize=(14, 42), layout=(16, 2))
-# Plot each of the 31 columns in its own sub-panel.
+df[cols_order].plot(subplots=True, figsize=(14, 42), layout=(16, 2))
+# Plot each of the 31 model columns (cols_order) in its own sub-panel. df also carries the
+# NINJA_HELPERS plumbing columns, excluded here so the layout stays 31 ≤ 32 slots.
 # layout=(16, 2) gives 32 slots — enough for 31 columns. layout=(9, 2) would fail (only 18 slots).
 plt.tight_layout()
 plt.show()
@@ -563,8 +614,9 @@ with warnings.catch_warnings():
 # If p-value = 0.01 (the minimum reported) → NOT stationary.
 print(stationarity)
 
-r = df.corr()
-# Compute the Pearson correlation matrix for all 31 columns.
+r = df[cols_order].corr()
+# Compute the Pearson correlation matrix for the 31 model columns (cols_order), excluding the
+# NINJA_HELPERS plumbing columns.
 
 print('Correlations with target (demanda_residual_h24):')
 print(r['demanda_residual_h24'].drop('demanda_residual_h24').sort_values(ascending=False).round(3))
@@ -638,9 +690,10 @@ predictions = {
 target_h24   = 'demanda_residual_h24'
 # The column name of our prediction target.
 
-features_h24 = [c for c in df.columns if c != target_h24]
-# List of all feature column names — every column except the target.
-# Should be exactly 30 features.
+features_h24 = [c for c in cols_order if c != target_h24]
+# Model feature columns = cols_order minus the target. Drawn from cols_order (NOT df.columns)
+# on purpose: df also carries the NINJA_HELPERS columns for the per-window calibration rebuild,
+# and those must never be fed to the models. Should be exactly 30 features.
 
 forecasts = {
     k: pd.DataFrame(data=np.nan, columns=[target_h24], index=datetime_index)
@@ -712,6 +765,38 @@ def rebuild_hidro_profile_features(df_in, T):
     return out
 
 
+def rebuild_calibration_features(df_in, T):
+    """
+    Re-fit the ninja→real solar calibration from TRAINING ROWS ONLY (rows < T) and apply it to
+    the four irradiance features, using ONLY ninja inputs — never target-hour real solar.
+
+    Why this exists — leakage prevention (review #3):
+    the old code scaled irradiance by a per-hour real/ninja ratio computed over the FULL year;
+    via the shift(-HORIZON) that builds irradiance_*_h24, that made the horizon weather features
+    proportional to real_solar[t+24], a term that defines the target. Here the factor is a
+    per-hour-of-day mean of (real_solar / ninja_solar) fitted on rows < T only (daytime rows,
+    where ninja_solar > 0) and applied by calendar hour. Because the horizon is +24 h (a whole
+    day), the target's clock-hour equals the current row's clock-hour, so the SAME hourly factor
+    correctly calibrates both the current irradiance and its _h24 shift. Applying it uses only
+    the raw ninja columns (irr_*_ninja, irr_*_ninja_h24) — no real solar from any row ≥ T.
+
+    Returns a copy of df_in with the four irradiance_* columns overwritten for cutoff T.
+    """
+    train = df_in.iloc[:T]
+    day   = train['solar_ninja'] > 0
+    ratio = train.loc[day, 'solar_mw'] / train.loc[day, 'solar_ninja']   # solar_mw is REAL here
+    k_by_hour = ratio.groupby(train.loc[day, 'hour']).mean()
+    k_global  = float(ratio.mean()) if len(ratio) else 1.0
+    k = df_in['hour'].map(k_by_hour).fillna(k_global).to_numpy()
+
+    out = df_in.copy()
+    out['irradiance_direct']      = (out['irr_direct_ninja'].to_numpy()      * k)
+    out['irradiance_diffuse']     = (out['irr_diffuse_ninja'].to_numpy()     * k)
+    out['irradiance_direct_h24']  = (out['irr_direct_ninja_h24'].to_numpy()  * k)
+    out['irradiance_diffuse_h24'] = (out['irr_diffuse_ninja_h24'].to_numpy() * k)
+    return out
+
+
 def get_targets_features(df_in, T, scale=False):
     """
     Feature extraction — Lagged Approach (snn_forec pattern).
@@ -729,9 +814,11 @@ def get_targets_features(df_in, T, scale=False):
     scale=True  → (Y_train, X_train, X_test, sx, sy)   # sx, sy = fitted feature/target scalers
 
     The test window covers the next HORIZON=24 rows starting at row T. The seasonal hydro
-    features are rebuilt from training-only data (see rebuild_hidro_profile_features) so no
-    window is fed information past its own cutoff.
+    features AND the solar calibration are rebuilt from training-only data (see
+    rebuild_hidro_profile_features and rebuild_calibration_features) so no window is fed
+    information past its own cutoff.
     """
+    df_in = rebuild_calibration_features(df_in, T)
     df_in = rebuild_hidro_profile_features(df_in, T)
 
     Y_train = df_in[[target_h24]].iloc[:T].copy()
