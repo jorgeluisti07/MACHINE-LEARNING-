@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.11 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble (6.78% MAPE). Weighted-ensemble code removed per user request — finding kept documented, see §9.2, §8 row 18
+**Version:** v26.13 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble (6.78% MAPE). Weighted-ensemble code removed per user request — finding kept documented, see §9.2, §8 row 18. **External review received and logged (§12) — none of it implemented yet.**
 
 > **Standing rule:** the Renewables.ninja download code (geocoding prompt, token, API calls) is
 > owned by the user — **do not modify it** without explicit instruction. See §8 row 10.
@@ -471,3 +471,218 @@ onward** (back to the pre-P5, pre-P1-revert v26.7/v26.9 state): `git revert 8991
 current state: `git revert 899160f` alone.
 
 To reproduce the **pre-fix (v25) numbers** for a thesis comparison table: `git stash && git checkout 698be5f~1 -- MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb`, re-run, then `git checkout HEAD -- MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb && git stash pop`. (Or simply cite §9.2 — the pre-fix numbers are preserved there.)
+
+---
+
+## 12. External Review — Feedback (v26.13, received 2026-07-23, NOT YET IMPLEMENTED)
+
+An external reviewer went through the code and gave detailed feedback — generally
+positive on structure/direction, with one critical correctness finding and ~19 other points. This
+section logs every point verbatim-in-substance, what was verified true/false against the current
+code, and a priority order, so implementation can proceed later without re-deriving any of this.
+**Nothing in this section has been implemented yet** — logged for future processing only, per the
+user's explicit request to think it through before touching code.
+
+### 12.1 Overall verdict
+Reviewer's summary: the DNN/XGBoost/ensemble model choice is reasonable, the rolling walk-forward
+design is good, the CSV-read fix and MAE-in-MW addition are correctly noted as improvements, and
+the code is easier to follow than before. The critical issue raised is **data leakage** in the
+solar calibration step, plus a cluster of time-alignment and methodology concerns. Closing
+instruction: **"fix the leakage and time alignment first, then rerun both models on a
+clean holdout period."**
+
+### 12.2 The 20 points, verified against the current code where possible
+
+**1. Two headings still say "Parquet"/"Excel" instead of CSV.**
+Checked: only one hit found (`MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb`, markdown cell, "Data
+sources & limitations" section), and it already reads "**Inputs are CSV** (not Excel/Parquet)" —
+already correct. README.md has zero hits. Likely the feedback was based on a copy from before this
+session's earlier consistency-audit fix. **Action:** ask for the exact location if it
+persists; otherwise no action needed.
+
+**2. Wants to see the revised README.** Not a code issue — a request to review `README.md`.
+
+**3. ⚠️ CRITICAL — solar irradiance calibration leaks target-hour information (NEW finding, not
+previously caught by this session's leakage audits).**
+Code (`MACHINE_LEARNING_RESIDUAL_DEMAND.py` ~line 241-249):
+```python
+solar_ninja  = df['solar_mw'].replace(0, np.nan)
+ratio_calib  = (df['solar_mw_real'] / solar_ninja).fillna(1)     # per-hour, FULL YEAR incl. test period
+df['irradiance_direct']  = (df['irradiance_direct']  * ratio_calib).fillna(0)
+df['irradiance_diffuse'] = (df['irradiance_diffuse'] * ratio_calib).fillna(0)
+```
+`ratio_calib[t]` uses the *real, metered* solar output at hour `t`. Later,
+`irradiance_direct_h24[t] = irradiance_direct[t+24]`, which is therefore proportional to
+`solar_mw_real[t+24]` — one of the three terms that directly defines the target
+(`demanda_residual_h24 = demanda_mw − solar_mw − eolica_mw` at t+24). This is a feature
+mathematically entangled with the target, not merely the already-disclosed "perfect-foresight
+weather" assumption (§7 Known Limitations) — it is materially worse. Only
+`irradiance_direct_h24`/`irradiance_diffuse_h24` are affected (they're the two features scaled by
+`ratio_calib`); `temperature_h24`/`wind_speed_h24` pass through un-scaled from the raw API pull and
+carry only the already-disclosed perfect-foresight issue, not this deeper one.
+**Consequence:** the documented "NWP horizon covariates are the most impactful feature group,
+−2.35pp MAPE" result (§4) is now suspect — some unknown fraction of that gain is likely this leak,
+not genuine forecastability. XGBoost's consistently high importance ranking for
+`irradiance_direct_h24` (top-3 every run this session) is also now suspect.
+**Reviewer's prescribed fix:** estimate the calibration (fixed factor or small model) from the
+**training window only**, per rolling window, then apply it fixed/frozen to that window's forecast
+block — do not use target-day real solar to compute the ratio applied to that same block. Same
+discipline as the already-fixed `rebuild_hidro_profile_features`, but this one hasn't been given
+that treatment yet and needs a new per-window rebuild function.
+
+**4. MERRA-2 perfect-foresight weather should be framed as an "oracle" experiment (upper bound),
+with a second experiment using realistic forecast weather.**
+Already disclosed as a limitation (§7), but the feedback wants it explicitly labeled as an
+oracle/best-case run rather than a general result, plus a **second, separate run** using something
+that approximates real day-ahead NWP forecast error (not the true future reanalysis value) — not
+yet built.
+
+**5. Hydro profile should be built inside each rolling window, not from the full year.**
+Checked: the modeling path is already fixed — `rebuild_hidro_profile_features(df_in, T)` rebuilds
+`hidro_typical_h24`/`hidro_anomaly_L24` from training-only rows per window, and this is what
+`get_targets_features` actually calls. A full-year global version (`_hidro_profile`, ~line 426)
+still exists in the dataframe for EDA/correlation plots only and is explicitly commented as such —
+it is dead for modeling but sits close enough in the code to read as a live bug on a linear
+pass. **Action:** clarify/relabel more defensively so it doesn't look like an active leak; no
+actual leakage-fix needed here (already done, see §8).
+
+**6. `hidro_mw` comment contradicts what the code does.**
+Checked: confirmed contradiction. Comment (~line 405) says "its LEVEL is dangerous... we encode
+the operational state through four derived features **instead**," but `hidro_mw` is still directly
+in `cols_order`, feeding both models raw. Not a leakage issue — a documentation-accuracy issue that
+needs a real decision (keep `hidro_mw` as a model input or not), not just a reworded comment.
+Note: P2 (feature pruning, tried and reverted earlier this session) explicitly kept `hidro_mw`
+**only** as a structural dependency for `rebuild_hidro_profile_features`, not as a direct model
+input candidate — that reasoning could inform this decision if/when revisited.
+
+**7. Add `origin_time` / `target_time` columns; use `target_time` for forecast indexing and plots.**
+`origin_time` = when the forecast is issued ("now"); `target_time` = the hour being predicted
+(origin + 24h). Current forecast arrays appear to be indexed by origin time, so a plotted "forecast
+at index t" is actually the forecast *for* t+24 — not wrong computationally (verified the rolling
+loop's T-window logic is sound), but easy to misread and a risk for future bugs. Not yet
+implemented.
+
+**8. State explicitly that the 24-row `X_test` block = the completed previous day, forecasting the
+following day.** Documentation/clarity ask, tied to #7 — no code change, just explicit statement of
+what one rolling block represents.
+
+**9. Lag-feature semantics: `shift(168)` is 168h before *input* time, i.e. 192h (not 168h) before
+the *target* time (input + 24h). If the intent is "same hour, one week before the target," the
+correct lag is `shift(144)`.**
+Verified by direct arithmetic: for row `t`, `residual_L168 = residual[t-168]`; distance from
+`t-168` to target `t+24` is `192h`. Both `shift(168)` and the alternative `shift(144)` are
+equally leakage-free (both look only backward) — this is a semantic-intent question, not a
+leakage bug. Also flags that the original Pearson-correlation analysis used to justify these three
+lags (`residual_L48`, `residual_L336`, `residual_L168`, §4) may have (a) used the wrong reference
+frame (input-relative vs. target-relative) and (b) been computed on the full year rather than
+training-only data — both should be rechecked/recomputed if this is revisited.
+
+**10. `DEM2025.csv` contains a `02/29/2025` row — 2025 is not a leap year, this date doesn't
+exist.**
+Verified: confirmed present (`grep -c` → 1 match). Currently silently dropped by
+`pd.to_datetime(..., errors='coerce')` + `dropna()`, with no warning surfaced. Needs investigation
+(why is it in ETESA's export?) and explicit documentation of the correction, not silent dropping.
+
+**11. Possible 1-hour misalignment between the demand file and the generation file's hour
+convention.**
+`solar_eolica_hidro_horario_2025.csv` starts at `01:00`; the demand-loading code maps `H1` → `00:00`
+of each date (`hora_num = extract(H\d+) - 1`). If ETESA labels hours by *end-of-interval* (hour 1 =
+the 00:00–01:00 block, stamped 01:00) rather than *start-of-interval*, the demand series could be
+shifted 1 hour relative to every other series (solar/wind/hydro/weather), corrupting every
+feature relationship by a constant offset. **Attempted to verify from data:** checked which labeled
+hour has peak solar output (expect ~solar noon) — peaks at labeled hour 12, which is only *weakly*
+diagnostic (consistent with either convention) and does **not** resolve the question. **Needs
+ETESA's documented hour convention — cannot be resolved from the data alone.** Currently unresolved.
+
+**12. Add explicit checks for missing hours / duplicate timestamps; don't trust row-count-based
+shifts.**
+Current lag/shift features assume "N rows back = N hours back," true only if the hourly index has
+no gaps or duplicates. Not currently checked explicitly anywhere in the pipeline. Wants an assertion
+(e.g. full, unique hourly `DatetimeIndex` coverage) added, not implemented yet.
+
+**13. Hardcoded Renewables.ninja API token must be removed, rotated, and read from an environment
+variable; never commit `.env`.**
+Verified: token is hardcoded in plain text (`MACHINE_LEARNING_RESIDUAL_DEMAND.py` line 89,
+`token = 'c4672deddb9f6acfa94e9cdbb34f6414fd51f255'`). This has been pushed to the remote repo
+multiple times this session, so the token should be treated as already exposed/compromised.
+**Note:** this touches the Renewables.ninja download block, which carries a standing "do not
+modify without explicit instruction" rule (§8 row 10) — this specific change (token → env var) is
+explicitly requested by the user, so it's in scope, but should be scoped tightly to
+just the token-handling lines, not a broader rewrite of that block. **The user must rotate the
+token themselves** — not something that can be done from this session.
+
+**14. Don't `pip install` inside the script; pin `requirements.txt` to fixed versions; save the raw
+API response for reproducibility.**
+Verified: `requirements.txt` exists but lists all packages unpinned (no version numbers). The
+script also runs `subprocess.check_call(['pip', 'install', 'xgboost', '-q'], ...)` at runtime
+(~line 1078) despite `xgboost` already being listed in `requirements.txt` — confirmed redundant.
+Raw API JSON response is not currently saved anywhere (only the final combined/processed CSV is
+exported, via the `renewables_ninja_2025.csv` traceability export added earlier this session).
+
+**15. MAE isn't in the final results comparison.**
+Checked: it already is — `results_summary` includes `MAE_MW` and `RMSE_MW` columns (confirmed via
+grep, ~line 1456-1474), added earlier this session. Likely based on a pre-this-session copy.
+
+**16. Save metrics and forecasts to files instead of keeping old result values as code comments.**
+Currently, historical results live as prose in code comments and in this document, not as
+on-disk artifacts (CSV/JSON) written per run. This is exactly the failure mode that caused the
+stale-data incident earlier this session (a hardcoded "6.78% MAPE" comment silently went stale
+after the underlying CSV changed). Not yet implemented.
+
+**17. The experimental/rejected model (e.g. an LSTM attempt) is missing from the repo.**
+Verified: `find . -iname "*lstm*" -o -iname "*experiment*"` returns nothing. The "Experimental
+models policy" (§10, bottom) is currently a policy with no actual artifact behind it in this repo.
+If an LSTM or similar was tried before, it isn't here — **this would be new work** (build a
+deliberately-weaker baseline, run it, document why it lost), not a recovery of lost work.
+
+**18. The same test period has guided too many keep/revert decisions to still count as an
+untouched holdout.**
+The Nov 2 – Dec 30 test window has been used to judge every roadmap item this session (P1, P5,
+weighted ensemble, P2) — each "keep or revert" call was made by reading that window's score.
+Repeated comparison against the same test set is a known way to end up with an optimistic final
+number, independent of any code bug. **Working distinction proposed (not yet agreed):** fixing a
+leakage/alignment bug and re-running is justified by a data-generating-process argument independent
+of the resulting score, and isn't the same kind of contamination as trying N modeling variants and
+keeping the best-scoring one. Under this framing: the leakage/alignment fixes can be re-run once
+against the *same* test window without "burning" it, but **from that point forward, further
+roadmap items (P4, P6, clustering-as-a-feature, etc.) should be judged on the validation split
+only**, with the test period touched exactly once more, at the end, for the number reported in the
+thesis. Needs explicit sign-off from the user before adoption.
+
+**19. Soften "the model can be used for forecasting" to "selected for further evaluation"; add a
+weekly-naive and a linear-regression baseline.**
+Verified: current print statements read `'*** The DNN can be used for forecasting. ***'` and the
+XGBoost equivalent (~line 1057, 1385), triggered solely by beating the (single) naive persistence
+baseline. Reviewer's point: beating one weak baseline isn't sufficient evidence of deployment
+readiness. Also wants two additional baseline comparators added: a weekly-naive model (same hour,
+7 days ago — note this would reuse/relate to the `residual_L168`/`L144` lag discussion in #9) and a
+simple linear regression, to show DNN/XGBoost add value over something much simpler than
+persistence alone. Not yet implemented.
+
+**20. Remove the global `warnings.filterwarnings('ignore')`; reduce excessive print output.**
+Verified: present at line 11, suppresses all Python warnings globally, which can hide real
+problems (e.g. a pandas warning flagging an actual bug) along with noise. Combined with a request
+to cut down the volume of print statements throughout so real output isn't buried. Not yet
+implemented.
+
+### 12.3 Priority tiers for implementation (matches the stated sequencing: fix leakage +
+alignment first, then one clean rerun)
+
+| Tier | Items | Status |
+|---|---|---|
+| 1 — correctness, must fix before any number is trustworthy | #3 solar calibration leak (train-window-only, frozen forward, new per-window rebuild function needed); #11 confirm hour convention (**blocked on ETESA source**); #6 decide `hidro_mw` in/out + fix comment; #7/#8 add `origin_time`/`target_time`, fix forecast plot indexing | Not started |
+| 2 — same tier, cheap but load-bearing | #9 lag semantics decision (144 vs 168) + training-only correlation recompute; #12 missing-hour/duplicate-timestamp checks; #10 document the Feb 29 row | Not started |
+| 3 — do together with the rerun | #19 add linear + weekly-naive baselines, soften model-selection message; #4 second experiment with realistic (non-oracle) forecast weather, clearly label the oracle run as an upper bound | Not started |
+| 4 — hygiene, no accuracy effect, safe anytime | #13 rotate + env-var the token (user must rotate); #14 pin `requirements.txt`, drop inline pip install, save raw API response; #20 remove global warnings filter, trim print volume; #16 write metrics/forecasts to files instead of code comments; #17 add the actual experimental/weaker model file; #1 verify Parquet/Excel headings (may already be resolved); #2 review updated README | Not started |
+
+### 12.4 Open questions blocking Tier 1 (need answers before implementation, not resolvable from
+the data or code alone)
+1. **ETESA's `H1` hour convention** (start-of-interval vs. end-of-interval) — determines whether
+   #11 is a real 1-hour misalignment bug or a non-issue. Needs authoritative source, not a guess.
+2. **What "clean holdout" concretely means** going forward — does the working distinction in #18
+   (re-run once after correctness fixes, then freeze the test window for all future roadmap
+   decisions) match what the user wants, or is a genuinely new/different period expected?
+3. **Whether an LSTM/alternative model was ever actually run** outside this repo (recoverable) or
+   whether #17 is new work to scope from scratch.
+4. **Lag semantics intent** (#9) — input-time-relative (`shift(168)`, current) vs. target-time-relative
+   (`shift(144)`) framing — a modeling choice, not purely a bug, needs a decision either way.
