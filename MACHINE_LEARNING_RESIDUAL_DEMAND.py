@@ -8,8 +8,6 @@ Converted from MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb
 
 
 import warnings
-warnings.filterwarnings('ignore')
-# Suppress all warnings so the notebook output stays clean.
 
 # ────────────────────────────────────────────────────────────────────────────
 # Horizon **h = 24** (day-ahead, hourly resolution).
@@ -132,6 +130,11 @@ r = s.get(url_solar, params=args_solar)
 print('Solar status:', r.status_code)
 # Status 200 means the request succeeded. Any other code indicates an error.
 
+with open('renewables_ninja_solar_raw.json', 'w') as _f:
+    _f.write(r.text)
+# Save the raw, unprocessed API response so a run's exact inputs can be reproduced/verified
+# later, independent of anything this script does to them downstream.
+
 parsed_solar = _json.loads(r.text)
 # Parse the raw JSON text into a Python dictionary.
 
@@ -151,6 +154,9 @@ data = data.set_index('local_time')
 
 # ── Wind ─────────────────────────────────────────────────────────────────────────
 r_wind = s.get(url_wind, params=args_wind)
+with open('renewables_ninja_wind_raw.json', 'w') as _f:
+    _f.write(r_wind.text)
+# Save the raw wind response too, same reproducibility rationale as the solar one above.
 parsed_wind = _json.loads(r_wind.text)
 wind_data = pd.read_json(_json.dumps(parsed_wind['data']), orient='index')
 wind_data['local_time'] = pd.to_datetime(wind_data['local_time']).dt.tz_localize(None)
@@ -198,6 +204,14 @@ demanda_long = demanda_raw.melt(id_vars=['fecha'], var_name='hora_str', value_na
 
 demanda_long  = demanda_long.dropna(subset=['fecha'])
 demanda_long['fecha_dt']  = pd.to_datetime(demanda_long['fecha'], errors='coerce')
+
+_bad_dates = sorted(demanda_long.loc[demanda_long['fecha_dt'].isna(), 'fecha'].unique())
+if _bad_dates:
+    print(f'WARNING: dropping {len(_bad_dates)} unparseable date(s) from DEM2025.csv: {_bad_dates}')
+    # Known case: the source export contains 02/29/2025, which does not exist (2025 is not a
+    # leap year — confirmed via external review, 2026-07-23). Treated as a source data error
+    # in ETESA's export and dropped here; surfaced explicitly rather than silently discarded.
+
 demanda_long  = demanda_long.dropna(subset=['fecha_dt'])
 # Parse dates; drop any rows where the date cannot be converted.
 
@@ -402,9 +416,15 @@ df['temperature_h24']        = df['temperature'].shift(-HORIZON)
 df['wind_speed_h24']         = df['wind_speed'].shift(-HORIZON)
 
 # Hydro dispatch features
-# Note: hidro_mw itself is already in the feature set, but its LEVEL is dangerous
-# (hidro + termica = residual_demand by definition → perfect collinearity if both are used).
-# We encode the operational state through four derived features instead.
+# Decision (external review, 2026-07-23): hidro_mw stays in the model as a raw current-hour
+# feature (see cols_order below) — it is NOT dropped in favor of the four derived features
+# below. hidro_mw + termica_mw = demanda_residual by definition, but termica_mw is not in this
+# dataset, so hidro_mw alone does not perfectly determine demanda_residual (only a variable
+# fraction of it) — it is not "perfect collinearity". Its measured XGBoost importance is low
+# (gain ≈ 0.005) mainly because demanda_residual is already a feature and captures the current
+# supply/demand balance more completely; hidro_mw is largely redundant with it, not unsafe.
+# The four derived features below add hydro-specific information (share, trend, seasonal
+# deviation) that the raw level alone doesn't carry.
 
 df['hidro_fraction_L24'] = (
     df['hidro_mw'].shift(LAG_1) /
@@ -1054,13 +1074,14 @@ elif does_it_overfit_dnn >= 0.1:
     print(f'The DNN overfits ({does_it_overfit_dnn:.2%} gap). Not recommended for forecasts.')
 else:
     print(
-        f'*** The DNN can be used for forecasting. ***\n'
+        f'*** The DNN is selected for further evaluation. ***\n'
         f'    MAPE={test_mape_dnn:.2%} | R²={test_r2_dnn:.4f} | '
         f'Improvement over naive: {improvement_dnn:.1f} %'
     )
-# Ie a model can be used for forecasts only if:
-#it beats the naive benchmark, AND
-#it does not overfit (test MAPE - train MAPE < 10 pp).
+# This check is a minimum bar, not a readiness verdict: beating naive persistence and staying
+# under a 10pp overfit gap only means the model clears the first two filters. It does NOT by
+# itself mean the model is ready for operational forecasting — see roadmap items on additional
+# baselines (weekly-naive, linear regression) and a realistic (non-oracle) weather experiment.
 
 # ────────────────────────────────────────────────────────────────────────────
 # XGBoost — Rolling h=24
@@ -1075,8 +1096,6 @@ else:
 # 6.1_ Using Rolling Predictions to train the model
 # ────────────────────────────────────────────────────────────────────────────
 
-import subprocess
-subprocess.check_call(['pip', 'install', 'xgboost', '-q'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 from xgboost import XGBRegressor
 # XGBRegressor: the scikit-learn compatible XGBoost regression interface.
 
@@ -1382,7 +1401,7 @@ elif does_it_overfit_xgb >= 0.1:
     print(f'XGBoost overfits ({does_it_overfit_xgb:.2%} gap). Not recommended for forecasts.')
 else:
     print(
-        f'*** XGBoost can be used for forecasting. ***\n'
+        f'*** XGBoost is selected for further evaluation. ***\n'
         f'    MAPE={test_mape_xgb:.2%} | R²={test_r2_xgb:.4f} | '
         f'Improvement over naive: {improvement_xgb:.1f} %'
     )
@@ -1475,3 +1494,21 @@ results_summary = pd.DataFrame(
 
 print('Test-period results (h=24, ' + f'{n_test_days} rolling days):')
 print(results_summary.to_string())
+
+# Persist this run's metrics and forecasts to disk (external review, 2026-07-23): result values
+# were previously only recorded as prose in code comments / CONTEXT.md, which goes stale silently
+# if the underlying data changes (as happened earlier this project). These files are the
+# ground truth for a given run; comments/docs should cite them, not replace them.
+results_summary.to_csv('results_summary.csv')
+
+_test_dates = datetime_index.iloc[T:T + n_test_hours].reset_index(drop=True)
+forecasts_out = pd.DataFrame({
+    'datetime': _test_dates,
+    'actual':   _test_actual,
+    'dnn':      _pred_dnn,
+    'xgboost':  _pred_xgb,
+    'ensemble': _pred_ens,
+    'naive':    naive_preds.astype(float),
+}).set_index('datetime')
+forecasts_out.to_csv('forecasts.csv')
+print(f"\nSaved 'results_summary.csv' and 'forecasts.csv' ({len(forecasts_out)} rows) for this run.")

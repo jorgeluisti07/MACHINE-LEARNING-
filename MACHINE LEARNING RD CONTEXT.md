@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.13 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble (6.78% MAPE). Weighted-ensemble code removed per user request — finding kept documented, see §9.2, §8 row 18. **External review received and logged (§12) — none of it implemented yet.**
+**Version:** v26.14 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble (6.78% MAPE). Weighted-ensemble code removed per user request — finding kept documented, see §9.2, §8 row 18. **External review logged (§12); 10 easy/trivial hygiene items implemented and verified (§12.5) — the leakage/alignment fixes (Tier 1) are still open.**
 
 > **Standing rule:** the Renewables.ninja download code (geocoding prompt, token, API calls) is
 > owned by the user — **do not modify it** without explicit instruction. See §8 row 10.
@@ -670,10 +670,10 @@ alignment first, then one clean rerun)
 
 | Tier | Items | Status |
 |---|---|---|
-| 1 — correctness, must fix before any number is trustworthy | #3 solar calibration leak (train-window-only, frozen forward, new per-window rebuild function needed); #11 confirm hour convention (**blocked on ETESA source**); #6 decide `hidro_mw` in/out + fix comment; #7/#8 add `origin_time`/`target_time`, fix forecast plot indexing | Not started |
-| 2 — same tier, cheap but load-bearing | #9 lag semantics decision (144 vs 168) + training-only correlation recompute; #12 missing-hour/duplicate-timestamp checks; #10 document the Feb 29 row | Not started |
-| 3 — do together with the rerun | #19 add linear + weekly-naive baselines, soften model-selection message; #4 second experiment with realistic (non-oracle) forecast weather, clearly label the oracle run as an upper bound | Not started |
-| 4 — hygiene, no accuracy effect, safe anytime | #13 rotate + env-var the token (user must rotate); #14 pin `requirements.txt`, drop inline pip install, save raw API response; #20 remove global warnings filter, trim print volume; #16 write metrics/forecasts to files instead of code comments; #17 add the actual experimental/weaker model file; #1 verify Parquet/Excel headings (may already be resolved); #2 review updated README | Not started |
+| 1 — correctness, must fix before any number is trustworthy | #3 solar calibration leak (train-window-only, frozen forward, new per-window rebuild function needed); #11 confirm hour convention (**blocked on ETESA source**); ~~#6 decide `hidro_mw` in/out + fix comment~~; #7/#8 add `origin_time`/`target_time`, fix forecast plot indexing | #6 done (2026-07-23, see §12.5); rest not started |
+| 2 — same tier, cheap but load-bearing | #9 lag semantics decision (144 vs 168) + training-only correlation recompute; #12 missing-hour/duplicate-timestamp checks; ~~#10 document the Feb 29 row~~ | #10 done (2026-07-23, see §12.5); rest not started |
+| 3 — do together with the rerun | #19 add linear + weekly-naive baselines, ~~soften model-selection message~~; #4 second experiment with realistic (non-oracle) forecast weather, clearly label the oracle run as an upper bound | #19 message-softening half done (2026-07-23); baselines + #4 not started |
+| 4 — hygiene, no accuracy effect, safe anytime | #13 rotate + env-var the token (**skipped for now, user's choice** — user must rotate); ~~#14 pin `requirements.txt`, drop inline pip install, save raw API response~~; ~~#20 remove global warnings filter~~ (print-volume trim still open); ~~#16 write metrics/forecasts to files instead of code comments~~; #17 add the actual experimental/weaker model file; ~~#1 verify Parquet/Excel headings~~ (already correct); ~~#2 review updated README~~ | #1, #2, #14, #16, #20 (partial) done (2026-07-23, see §12.5); #13, #17 not started |
 
 ### 12.4 Open questions blocking Tier 1 (need answers before implementation, not resolvable from
 the data or code alone)
@@ -686,3 +686,35 @@ the data or code alone)
    whether #17 is new work to scope from scratch.
 4. **Lag semantics intent** (#9) — input-time-relative (`shift(168)`, current) vs. target-time-relative
    (`shift(144)`) framing — a modeling choice, not purely a bug, needs a decision either way.
+
+### 12.5 Implementation log — Easy/Trivial batch (2026-07-23)
+
+10 of the 20 items were implemented and verified in one batch (user explicitly selected these;
+`#13` token-to-env-var was in the same "easy" tier but not selected, so it's still open). All are
+pure hygiene/documentation fixes with **no effect on model behavior or reported metrics** — verified
+by re-running the full rolling pipeline end-to-end in the scratch environment against the same
+data used for the current shipped baseline and confirming the results are unchanged (Ensemble
+6.78% MAPE / 5.83% WAPE / 66.5 MAE / 94.3 RMSE — identical to the pre-change 30-feature baseline
+in §9.2, as expected since none of these items touch feature construction or model training).
+
+| # | Item | Change | Verified |
+|---|---|---|---|
+| #20 | Remove global warning suppression | Deleted `warnings.filterwarnings('ignore')` (line 11); the `import warnings` and the later scoped `catch_warnings()` block (KPSS stationarity test) are untouched since still needed | Full run completed with no crash or unexpected warning spam |
+| #14b | Remove inline `pip install xgboost` | Deleted the `subprocess.check_call(['pip','install','xgboost',...])` call — redundant, `xgboost` was already pinned in `requirements.txt` | Run imports `xgboost` successfully without it |
+| #1 | Parquet/Excel headings | Checked — already correct (`**Inputs are CSV** (not Excel/Parquet)`, notebook markdown cell). No change needed; likely feedback was based on a pre-this-session copy | Verified by grep, no occurrences left |
+| #15 | MAE in final results table | Checked — already present (`MAE_MW`, `RMSE_MW` columns in `results_summary`), added earlier this session | Verified by grep |
+| #14a | Pin `requirements.txt` | Added exact version pins for all 12 packages, matched to a known-working environment (pandas 3.0.3, numpy 2.4.6, matplotlib 3.11.0, requests 2.33.1, geopy 2.4.1, statsmodels 0.14.6, scipy 1.17.1, seaborn 0.13.2, scikit-learn 1.9.0, xgboost 3.2.0, tensorflow 2.21.0, tqdm 4.68.4) | N/A (dependency file, not exercised by a single run) |
+| #19a | Soften model-selection message | `'*** The DNN/XGBoost can be used for forecasting. ***'` → `'*** ... is selected for further evaluation. ***'`; replaced the old 3-line comment under the DNN branch with one clarifying this is a minimum bar, not a readiness verdict (weekly-naive/linear baselines and the realistic-forecast experiment, #19b/#4, are still open) | Log shows the new message for both DNN and XGBoost |
+| #10 | Document the Feb 29, 2025 bad-date row | Added an explicit `WARNING: dropping N unparseable date(s) from DEM2025.csv: [...]` print right before the existing `dropna(subset=['fecha_dt'])`, with a comment noting 2025 isn't a leap year and this is a known source-data error | Log's very first line: `WARNING: dropping 1 unparseable date(s) from DEM2025.csv: ['02/29/2025']` |
+| #6 | `hidro_mw` in/out decision | **Decision: keep `hidro_mw`** as a raw current-hour model input (status quo, matches the post-P2-revert state). Rewrote the comment: the old "perfect collinearity" claim was itself inaccurate (would require `termica_mw`, which isn't in this dataset — `hidro_mw` alone only partially explains `demanda_residual`); its true low importance (gain ≈ 0.005, from the P2 analysis) is redundancy with the already-present `demanda_residual` feature, not danger | Comment now matches code; `hidro_mw` confirmed still in `cols_order` |
+| #16 | Save metrics/forecasts to files | Added `results_summary.to_csv('results_summary.csv')` and a new `forecasts.csv` (datetime, actual, dnn, xgboost, ensemble, naive columns, one row per test hour) at the end of the run | Both files produced correctly in the verification run (`results_summary.csv`: 5 rows; `forecasts.csv`: 1392 rows, correct columns and values matching the printed table) |
+| #14c | Save raw API response | Added `open('renewables_ninja_solar_raw.json','w').write(r.text)` and the wind equivalent, right after each API call, before any parsing | Verified syntactically only — this code path is in the Renewables.ninja download block, which the scratch-run substitution replaces with a direct CSV read (can't exercise the live API from this session); low-risk, single `open().write()` calls |
+
+Synced into both `.py` and `.ipynb`, `py_compile` + per-cell `ast.parse` clean on both. `README.md`
+"Expected output" section updated to list `results_summary.csv`/`forecasts.csv` and to drop the
+stale "Weighted Ensemble" table-row mention (leftover from before that code was removed, §8 row 18
+— unrelated to this batch but caught while editing the same paragraph).
+
+**Not done from the "easy" tier:** `#13` (token → env var) — explicitly not selected by the user
+this round, left for later. Print-volume trimming (second half of `#20`) also not done — only the
+global-suppression removal was in scope.
