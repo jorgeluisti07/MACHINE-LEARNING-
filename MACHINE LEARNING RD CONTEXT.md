@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.15 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble (6.78% MAPE). Weighted-ensemble code removed per user request — finding kept documented, see §9.2, §8 row 18. **External review logged (§12); 10 easy/trivial hygiene items implemented and verified (§12.5) — the leakage/alignment fixes (Tier 1) are still open. Backup/checkpoint protocol added (§13).**
+**Version:** v26.16 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble. **HONEST BASELINE = 8.33% MAPE Ensemble (§12.6)** after fixing the solar-calibration leak (#3) + hour-ending demand alignment (#11); the earlier 6.78% (§9.2, §0) was leaky and is superseded. Weighted-ensemble code removed per user request (§9.2, §8 row 18). External review logged (§12); easy/trivial batch done (§12.5); correctness batch done (§12.6). Still open: #7/#8, #9, #19b, #4, #20. Backup/checkpoint protocol in §13.
 
 > **Standing rule:** the Renewables.ninja download code (geocoding prompt, token, API calls) is
 > owned by the user — **do not modify it** without explicit instruction. See §8 row 10.
@@ -13,7 +13,12 @@
 - **Problem:** day-ahead (h+24) residual demand forecasting for Panama, DNN vs XGBoost, expanding-window rolling validation.
 - **Inputs are CSV, not Excel/Parquet.** `DEM2025.csv` (wide, `H1`..`H24`) and `solar_eolica_hidro_horario_2025.csv` (long). See §1.
 - **Two known limitations baked into the methodology** (not bugs, but must be disclosed in the thesis): perfect-foresight h+24 weather, and a previously-leaky hydro baseline that has since been fixed. See §7.
-- **Current best result: Ensemble (0.5·DNN + 0.5·XGB) at 6.78% MAPE / 94.3 MW RMSE** (§9.2, v26.10), after applying P5's XGBoost regularization sweep. §9.1 has the post-leakage-fix baseline before P5 (DNN 7.02% / XGB 7.31% MAPE) for comparison — the leakage fix slightly *improved* accuracy while making the methodology honest.
+- **⚠️ SUPERSEDED — HONEST BASELINE is now Ensemble 8.33% MAPE / 110.7 MW RMSE (§12.6)**, after
+  fixing the solar-calibration leak (#3) and the hour-ending demand alignment (#11). The 6.78%
+  figure below (and everywhere in §9) was computed with the calibration leak present and is
+  optimistic; kept only as a historical/comparison record.
+- ~~Current best result: Ensemble at 6.78% MAPE / 94.3 MW RMSE (§9.2, v26.10)~~ — leaky, see above.
+  The P5 sweep and flat-ensemble findings still hold directionally; only the absolute numbers move.
 - **§10 is the optimization roadmap** — prioritized, evidence-based ideas to boost precision, derived from the post-fix feature-importance and error plots. Implement top-down; each item states its expected payoff and risk.
 - Full history of what went wrong and what was fixed is in **§8 Fixes Log** — check it before "discovering" an issue that's already been handled. **§11 has revert instructions** (git commits) if any change needs to be undone.
 
@@ -251,6 +256,11 @@ bit-reproducibility is ever required, try `tf.config.experimental.enable_op_dete
 ---
 
 ## 9. Results
+
+> **⚠️ All numbers in §9 are SUPERSEDED by §12.6 (2026-07-23).** They were computed with the
+> solar-calibration leak (#3) present and the hour-beginning demand misalignment (#11) — i.e.
+> optimistic. The honest baseline is **Ensemble 8.33% MAPE** (§12.6). §9 is retained as a
+> historical record and for the pre-vs-post-fix comparison, not as current results.
 
 ### 9.1 Current results — POST-leakage-fix + Ensemble (v26.5)
 
@@ -718,6 +728,62 @@ stale "Weighted Ensemble" table-row mention (leftover from before that code was 
 **Not done from the "easy" tier:** `#13` (token → env var) — explicitly not selected by the user
 this round, left for later. Print-volume trimming (second half of `#20`) also not done — only the
 global-suppression removal was in scope.
+
+### 12.6 Implementation log — Correctness batch: leakage + time alignment (2026-07-23)
+
+The reviewer's #1 instruction ("fix the leakage and time alignment first, then rerun"). Three
+model-affecting correctness fixes, done together and validated in **one** rerun (grouping is
+consistent with the reviewer's instruction; none of the three is a score-chasing tuning choice —
+each is justified by the data-generating process, so re-running the same test window to measure
+their honest effect does not "burn" the holdout, per the §12.2 #18 framing).
+
+**What changed:**
+- **#3 solar calibration leakage (critical).** Old: irradiance scaled by a FULL-YEAR per-hour
+  `real_solar/ninja_solar` ratio, baked into `irradiance_direct/diffuse`; via the `shift(-HORIZON)`
+  that builds `irradiance_*_h24`, this made the horizon weather features proportional to
+  `real_solar[t+24]` — a term that defines the target. New: raw ninja irradiance/solar are kept as
+  helper columns; a new `rebuild_calibration_features(df_in, T)` re-fits a per-hour-of-day
+  `real/ninja` factor from **training rows (< T) only** per rolling window and applies it using only
+  ninja inputs (never target-hour real solar). `features_h24` is now drawn explicitly from
+  `cols_order` so the raw-ninja helper columns are never fed to the models. Unit test
+  (`scratchpad/test_calibration_leakage.py`) proves the calibrated irradiance is invariant to
+  perturbing test-period (≥ T) real solar, and that the removed full-year ratio would have leaked.
+- **#11 hour-ending alignment (resolved with user input).** The generation file spans
+  `2025-01-01 01:00 → 2026-01-01 00:00` = exactly 8760 rows — the signature of **hour-ending**
+  labeling (first hour 00:00–01:00 stamped 01:00). ETESA's demand `H1` is therefore the hour ending
+  01:00, so the loader now maps `H_k → k:00` (was `(k-1):00`). The old mapping placed demand one
+  hour BEFORE generation, so `demanda_residual = demanda − solar − eólica` mixed two different
+  physical hours — a corrupted target. After the fix the demand↔generation join has **zero NaN**.
+  (Still open: the Renewables.ninja weather timestamps may use hour-BEGINNING; that is a separate
+  feature-alignment question, flagged in-code, not changed here.)
+- **#12 index integrity.** Assert the hourly index is gap-free and duplicate-free before any
+  row-count-based shift (a missing/duplicate hour would silently make a 24-row shift ≠ 24 hours).
+  Passes on the real data (8,754 rows, gap-free).
+
+**Honest before/after (same 58-day Nov 2–Dec 30 test window, corrected data). Numbers went UP —
+this is the point: the leak was inflating the weather features' apparent skill.**
+
+| Model | MAPE% before → after | WAPE% | MAE MW | RMSE MW |
+|---|---|---|---|---|
+| DNN | 7.01 → **8.65** | 6.11 → 7.26 | 69.7 → 82.8 | 96.6 → 115.3 |
+| XGBoost | 7.10 → **8.36** | 6.07 → 7.00 | 69.3 → 79.8 | 99.2 → 111.6 |
+| **Ensemble** | 6.78 → **8.33** | 5.83 → 6.95 | 66.5 → 79.3 | 94.3 → 110.7 |
+| Naive | 11.57 → 11.66 | — | — | 165.0 → 163.9 |
+
+The flat Ensemble is still the best model and still beats naive by ~28%. The ≈1.5 pp MAPE rise is
+the honest cost of removing the calibration leak plus the target re-alignment — the reviewer
+explicitly predicted "it will make the reported scores too optimistic," now corrected. **This 8.33%
+Ensemble is the new honest baseline; supersedes the 6.78% figure in §9.2 and §0, which was leaky.**
+The per-run `results_summary.csv` / `forecasts.csv` (review #16) are the ground truth for this run.
+
+**Revert:** `git revert d7c875d` restores the leaky calibration + hour-beginning demand mapping +
+removes the index checks (do NOT, except to reproduce the old inflated numbers for a comparison
+table). The three fixes are intertwined in one commit because they were validated in one rerun; to
+isolate just one, revert and re-apply selectively.
+
+**Not in this batch (next):** #7/#8 (origin_time/target_time), #9 (lag semantics doc + training-only
+correlations), #19b (weekly-naive + linear baselines), #4 (realistic no-oracle-weather ablation),
+#20 (print trimming). These are additive/labeling/doc changes that don't affect the DNN/XGB numbers.
 
 ---
 
