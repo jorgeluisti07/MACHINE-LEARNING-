@@ -760,6 +760,14 @@ their honest effect does not "burn" the holdout, per the §12.2 #18 framing).
   row-count-based shift (a missing/duplicate hour would silently make a 24-row shift ≠ 24 hours).
   Passes on the real data (8,754 rows, gap-free).
 
+**Adversarial review (independent subagent, 2026-07-23): CLEAN on all 6 checked points** — (1) the
+calibration factor is fit strictly on rows < T; (2) the `_h24` alignment is sound because
+`hour(t+24)==hour(t)` under the enforced gap-free index; (3) the raw-ninja helpers are structurally
+excluded from `features_h24` (drawn from `cols_order`); (4) `rebuild_calibration_features` is called
+per window with the correct `T` (=`T_day`), no future data; (5) the `shift(-HORIZON)` NaN tail is
+fully trimmed by `df.iloc[MAX_LAG:-HORIZON]`; (6) the demand hour-ending remap is self-consistent
+and nothing downstream assumed the old `H1→00:00`. Plus the calibration-leakage unit test passing.
+
 **Honest before/after (same 58-day Nov 2–Dec 30 test window, corrected data). Numbers went UP —
 this is the point: the leak was inflating the weather features' apparent skill.**
 
