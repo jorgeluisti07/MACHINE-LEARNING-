@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.16 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble. **HONEST BASELINE = 8.33% MAPE Ensemble (§12.6)** after fixing the solar-calibration leak (#3) + hour-ending demand alignment (#11); the earlier 6.78% (§9.2, §0) was leaky and is superseded. Weighted-ensemble code removed per user request (§9.2, §8 row 18). External review logged (§12); easy/trivial batch done (§12.5); correctness batch done (§12.6). Still open: #7/#8, #9, #19b, #4, #20. Backup/checkpoint protocol in §13.
+**Version:** v26.17 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble. **CURRENT BASELINE = 8.18% MAPE Ensemble, 59 rolling days (§12.7)** — supersedes §12.6's 8.33%/58-day figure (test period grew 1 day after the #9 lag fix shrank burn-in) and the original leaky 6.78% (§9.2, §0). Two new baselines added: Linear regression (8.47% MAPE — close behind DNN/XGB) and Weekly-Naive (12.26% — worse than simple persistence). Weighted-ensemble code removed per user request (§9.2, §8 row 18). External review logged (§12); done: easy/trivial batch (§12.5), correctness batch (§12.6), labeling+lag+baselines batch (§12.7). Still open: #4 (realistic no-oracle-weather run), #13 (token env var), #17 (experimental model), #18 (holdout discipline sign-off). Backup/checkpoint protocol in §13.
 
 > **Standing rule:** the Renewables.ninja download code (geocoding prompt, token, API calls) is
 > owned by the user — **do not modify it** without explicit instruction. See §8 row 10.
@@ -792,6 +792,79 @@ isolate just one, revert and re-apply selectively.
 **Not in this batch (next):** #7/#8 (origin_time/target_time), #9 (lag semantics doc + training-only
 correlations), #19b (weekly-naive + linear baselines), #4 (realistic no-oracle-weather ablation),
 #20 (print trimming). These are additive/labeling/doc changes that don't affect the DNN/XGB numbers.
+
+### 12.7 Implementation log — Labeling, lag semantics, and two new baselines (2026-07-23)
+
+**#7/#8 origin_time / target_time.** Forecasts, plots, and the forecasts.csv export were indexed
+by `datetime_index` — the row's own timestamp ("now"), when the forecast is issued — but the value
+held is for 24h later. Added explicit `origin_time`/`target_time` series (`target_time = origin_time
++ 24h`); the `forecasts` dict, every forecast-vs-actual plot x-axis (DNN/XGBoost test + training
+zooms), and `forecasts.csv` now use `target_time`. The "Test start/end" print now shows both ranges
+labeled. **Verified no behavior change**: every downstream read of `forecasts[...]` uses `.iloc`
+(positional), so relabeling the index is safe — confirmed in the scratch run (`forecasts.csv` shows
+`target_time`/`origin_time` as separate columns with the correct 24h offset, e.g. target
+`2025-11-02 17:00` ↔ origin `2025-11-01 17:00`).
+
+**#9 lag semantics — switched, not just documented.** `residual_L168`/`residual_L336` were
+168h/336h before the *input* time, i.e. 192h/360h (not a clean week/fortnight) before the actual
+*target*. Measured **training-only** (rows < T=7000) Pearson correlations on the current
+leak-fixed + hour-aligned pipeline:
+
+| Shift | Framing | r (training-only) |
+|---|---|---|
+| 144h | target-relative, 1 week before TARGET | **0.780** |
+| 168h | input-relative, 1 week before INPUT (old) | 0.667 |
+| 312h | target-relative, 2 weeks before TARGET | **0.764** |
+| 336h | input-relative, 2 weeks before INPUT (old) | 0.651 |
+| 48h | (unchanged — target=input+24h either way for this one) | 0.575 |
+
+The gap (≈0.11 Pearson r) was large enough to switch, not just document as a status-quo default.
+`LAG_2=312`, `LAG_3=144`; columns renamed `residual_L312`/`residual_L144`; `MAX_LAG` shrank
+336→312 (24 fewer burn-in rows). `LAG_1=24` (hydro state features) is unaffected — those describe
+"now", so input-relative is correct there and was left alone.
+**Side effect (expected, not a bug):** fewer burn-in rows means 24 more usable rows overall, so
+one more full rolling day fits in the test period — **59 rolling days now, was 58.**
+
+**#19b two new baselines.** Weekly-naive needed no new computation — it's exactly `residual_L144`
+(same clock-hour, 1 week before the target, by construction). A walk-forward linear regression
+(same leakage-safe `get_targets_features` per window as DNN/XGBoost, no tuning/plots — kept
+minimal, it's a comparison baseline not a candidate model) was added as `Linear`.
+
+**#20** removed the one genuine excessive-print offender: `print(df.to_string())` in `.py` / a
+trailing bare `df` in `.ipynb`, an unbounded ~8,700-row full-dataframe dump with no diagnostic
+purpose. The bounded summary prints (`describe()`, `isnull().sum()`, `dtypes`, stationarity table,
+results tables) were left as-is — they're meaningful, not excessive.
+
+**Full results (59 rolling days, same corrected data as §12.6 — numbers shift slightly from the
+extra day + lag-feature change, not a regression):**
+
+| Model | MAPE% | WAPE% | MAE MW | RMSE MW |
+|---|---|---|---|---|
+| **Ensemble** | **8.18** | **6.95** | **79.2** | **112.7** |
+| XGBoost | 8.34 | 7.10 | 81.0 | 115.2 |
+| DNN | 8.41 | 7.16 | 81.6 | 114.9 |
+| Linear | 8.47 | 7.26 | 82.7 | 116.0 |
+| Naive | 11.59 | 10.06 | 114.7 | 163.0 |
+| Weekly-Naive | 12.26 | 10.70 | 121.9 | 172.0 |
+
+**Two genuinely new findings from the added baselines:**
+- **Linear regression (8.47%) is close behind DNN/XGBoost (8.41%/8.34%)** — a plain OLS on the
+  same 30 features gets within ~0.3pp of the tuned nonlinear models. Most of this pipeline's
+  accuracy comes from the feature engineering (lags, calendar, calibrated weather), not from
+  model sophistication — a fair, slightly humbling result worth stating plainly in the thesis.
+- **Weekly-naive (12.26%) is *worse* than simple day-to-day persistence (11.59%)** — "same hour
+  last week" is a weaker predictor here than "same hour yesterday", despite the strong
+  same-week-hour correlation measured above (r=0.780). Correlation with the target and being a
+  *good standalone point forecast* are different things — persistence benefits from short-range
+  autocorrelation that a 1-week-old value doesn't have. Both baselines still confirm DNN/XGB/
+  Ensemble/Linear all comfortably beat naive persistence.
+
+Synced into `.py` and `.ipynb`, `py_compile` + per-cell `ast.parse` clean on both, full scratch
+rerun clean (index check passed, Feb-29 warning fired, no errors). `results_summary.csv` (6 rows)
+and `forecasts.csv` (1416 rows, `target_time`/`origin_time` both present) written correctly.
+
+**Revert:** `git revert d106a7c` restores input-relative lags (168/336), origin-time-indexed
+forecasts, removes the weekly-naive/linear baseline rows, and restores the full-dataframe print.
 
 ---
 
