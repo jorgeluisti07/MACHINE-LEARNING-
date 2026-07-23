@@ -60,6 +60,43 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+## 5. Backup & Checkpoint Protocol
+
+**Unpushed work does not durably exist.** This container can reset silently, mid-session, with no
+reliable warning — two mild resets have rewound the local git pointer (recoverable via fetch); one
+reset destroyed an entire isolated worktree with 7 unpushed, unverified commits, saved only by luck
+(an agent's own chat transcript surviving independently). That's not a real safety net.
+
+The backup rule (mandatory push-early protocol):
+- Push a checkpoint to a `backup/<name>` branch as soon as there's any real progress — after the
+  first commit, not the last. An unpushed commit, however correct, does not durably exist.
+- Re-push periodically during long work, not just at the end. A reset can land mid-task.
+- At the start of any session (or before any big task), verify local state actually matches
+  origin — `git fetch origin <branch>`, compare `git log --oneline -1` locally vs. `origin/<branch>`.
+  Never assume a clean local checkout reflects reality.
+- Isolation (a worktree) protects against edit conflicts. It is NOT a substitute for pushing. An
+  unpushed worktree is exactly as exposed to total loss as working directly on the main checkout.
+- Only the final, reviewed result needs to land on the real working branch. Backup branches can be
+  left in place or cleaned up later — their only job is to survive long enough to matter.
+
+**Automated enforcement:** a `Stop` hook (`~/.claude/stop-hook-git-check.sh`, outside this repo —
+machine config, not something `git push` carries forward) blocks ending a turn while the current
+branch or any git worktree has uncommitted, untracked, or unpushed work. If a future session finds
+this isn't being caught anymore, that hook may be missing and needs re-adding — see
+`MACHINE LEARNING RD CONTEXT.md` for the exact script to restore it.
+
+**The checkpoint rule (`/checkpoint`):** a hard usage cutoff isn't reliably self-detectable from
+inside a session, but a warning sign (a usage indicator, degrading responses) might be caught
+first. `/checkpoint` forces an immediate stop-and-save:
+- Commits and pushes whatever exists — even incomplete, to a `checkpoint/*` branch if it's not
+  safe for the main branch yet.
+- Writes a complete handoff summary directly in the chat reply, not just to a file — because the
+  next session's context comes from the conversation, not disk.
+- Captures any durable lesson into `MACHINE LEARNING RD CONTEXT.md` if one emerged.
+- Ends the turn without picking up further work.
+
+Use it any time a session seems close to a hard cutoff.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

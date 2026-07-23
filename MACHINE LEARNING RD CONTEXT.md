@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.14 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble (6.78% MAPE). Weighted-ensemble code removed per user request — finding kept documented, see §9.2, §8 row 18. **External review logged (§12); 10 easy/trivial hygiene items implemented and verified (§12.5) — the leakage/alignment fixes (Tier 1) are still open.**
+**Version:** v26.15 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble (6.78% MAPE). Weighted-ensemble code removed per user request — finding kept documented, see §9.2, §8 row 18. **External review logged (§12); 10 easy/trivial hygiene items implemented and verified (§12.5) — the leakage/alignment fixes (Tier 1) are still open. Backup/checkpoint protocol added (§13).**
 
 > **Standing rule:** the Renewables.ninja download code (geocoding prompt, token, API calls) is
 > owned by the user — **do not modify it** without explicit instruction. See §8 row 10.
@@ -718,3 +718,118 @@ stale "Weighted Ensemble" table-row mention (leftover from before that code was 
 **Not done from the "easy" tier:** `#13` (token → env var) — explicitly not selected by the user
 this round, left for later. Print-volume trimming (second half of `#20`) also not done — only the
 global-suppression removal was in scope.
+
+---
+
+## 13. Session Infrastructure — Backup/Checkpoint Protocol & Stop-Hook Recovery
+
+This section is process/tooling documentation, not modeling methodology — kept here (rather than
+only in CLAUDE.md) because CLAUDE.md's backup rule (§5 there) points back to this file for the
+exact script, in case the hook is ever missing from a future container and needs restoring.
+
+### 13.1 Why this exists
+This container can reset silently mid-session, with no reliable warning. Two mild resets have
+rewound the local git pointer (recoverable via `git fetch`); one reset destroyed an entire isolated
+worktree with 7 unpushed, unverified commits — saved only by luck (an agent's own chat transcript
+surviving independently). Unpushed work does not durably exist; a clean local checkout is not proof
+that origin has the same state.
+
+### 13.2 The 5 backup rules (mirrors CLAUDE.md §5 — see there for the authoritative version)
+1. Push a checkpoint to a `backup/<name>` branch as soon as there's any real progress — after the
+   first commit, not the last.
+2. Re-push periodically during long work, not just at the end.
+3. At the start of any session, verify local state matches origin (`git fetch origin <branch>`,
+   compare `git log --oneline -1` locally vs. `origin/<branch>`) — never assume a clean checkout
+   reflects reality.
+4. A worktree protects against edit conflicts, not data loss — it is not a substitute for pushing.
+5. Only the final, reviewed result needs to land on the real working branch; backup branches can be
+   left in place or cleaned up later.
+
+### 13.3 `/checkpoint` — forced stop-and-save
+Use any time a session seems close to a hard usage cutoff (a usage indicator, degrading responses).
+It commits and pushes whatever exists — even incomplete, to a `checkpoint/*` branch if not yet safe
+for the main branch — writes a full handoff summary directly in the chat reply (the next session's
+context comes from the conversation, not disk), captures any durable lesson here, and ends the turn
+without picking up further work.
+
+### 13.4 Stop-hook script (restore to `~/.claude/stop-hook-git-check.sh` if missing)
+Blocks ending a turn while the current branch has uncommitted, untracked, or unpushed work (or
+commits GitHub would show as "Unverified"). This is machine config, outside the repo — `git push`
+does not carry it forward to a fresh container, which is why it's archived here.
+
+```bash
+#!/bin/bash
+
+# Read the JSON input from stdin
+input=$(cat)
+
+# Check if stop hook is already active (recursion prevention)
+stop_hook_active=$(echo "$input" | jq -r '.stop_hook_active')
+if [[ "$stop_hook_active" = "true" ]]; then
+  exit 0
+fi
+
+# Check if we're in a git repository - bail if not
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  exit 0
+fi
+
+# Bail if there's no remote to push to. Every error path below asks the user
+# to "push to the remote branch" — meaningless without a remote, and
+# unsatisfiable if signing also requires a source. This case arises when CCR
+# was launched against a local repo with no github remote (sources=[]) and
+# the container's cwd has a leftover .git from a cached resume.
+if [[ -z "$(git remote)" ]]; then
+  exit 0
+fi
+
+# Check for uncommitted changes (both staged and unstaged)
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "There are uncommitted changes in the repository. Please commit and push these changes to the remote branch." >&2
+  exit 2
+fi
+
+# Check for untracked files that might be important
+untracked_files=$(git ls-files --others --exclude-standard)
+if [[ -n "$untracked_files" ]]; then
+  echo "There are untracked files in the repository. Please commit and push these changes to the remote branch." >&2
+  exit 2
+fi
+
+current_branch=$(git branch --show-current)
+if [[ -n "$current_branch" ]]; then
+  if git rev-parse "origin/$current_branch" >/dev/null 2>&1; then
+    upstream="origin/$current_branch"
+  else
+    upstream="origin/HEAD"
+  fi
+
+  # Check for local commits that GitHub will show as "Unverified": either no
+  # signature at all (%G? == N), or signed with a committer email other than
+  # noreply@anthropic.com (the identity CCR's signing key is registered to).
+  # Only run when commit signing is configured. Note: %G? is N for unsigned
+  # commits; signed-but-locally-unverifiable commits report B/U/E, so this is
+  # a reliable presence check even though CCR doesn't configure local verification.
+  if [[ "$(git config --type=bool commit.gpgsign 2>/dev/null)" == "true" ]]; then
+    unverifiable=$(git log --format='%h %G? %ce' "$upstream..HEAD" 2>/dev/null | awk '$2 == "N" || $3 != "noreply@anthropic.com"')
+    if [[ -n "$unverifiable" ]]; then
+      echo "There are commit(s) on branch '$current_branch' that GitHub will show as Unverified (missing signature, or committer email is not noreply@anthropic.com):" >&2
+      echo "$unverifiable" >&2
+      echo "Please run 'git config user.email noreply@anthropic.com && git config user.name Claude', then 'git commit --amend --no-edit --reset-author' for the tip commit, or 'git rebase --exec \"git commit --amend --no-edit --reset-author\" $upstream' for earlier commits, then push." >&2
+      exit 2
+    fi
+  fi
+
+  unpushed=$(git rev-list "$upstream..HEAD" --count 2>/dev/null) || unpushed=0
+  if [[ "$unpushed" -gt 0 ]]; then
+    if [[ "$upstream" == "origin/$current_branch" ]]; then
+      echo "There are $unpushed unpushed commit(s) on branch '$current_branch'. Please push these changes to the remote repository." >&2
+    else
+      echo "Branch '$current_branch' has $unpushed unpushed commit(s) and no remote branch. Please push these changes to the remote repository." >&2
+    fi
+    exit 2
+  fi
+fi
+
+exit 0
+```
