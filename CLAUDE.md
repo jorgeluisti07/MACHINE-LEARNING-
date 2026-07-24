@@ -97,6 +97,17 @@ first. `/checkpoint` forces an immediate stop-and-save:
 
 Use it any time a session seems close to a hard cutoff.
 
+## 6. No Emojis
+
+**Never add emojis to notebooks, markdown docs, or code comments in this repo.**
+
+- Applies to `.ipynb`, `.md` (including `MACHINE LEARNING RD CONTEXT.md` and `README.md`), and
+  code comments in `.py` files.
+- Use plain words instead of status emoji (e.g. "Fixed", "Open", "CRITICAL" — not checkmarks,
+  warning signs, or clipboard icons). The word alone carries the meaning.
+- Plain typographic characters that aren't emoji — arrows (`→`, `↔`), section markers (`§`),
+  math/comparison symbols — are fine; they're notation, not decoration. Don't strip those.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
