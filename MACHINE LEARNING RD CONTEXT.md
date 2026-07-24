@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.18 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble. **ORACLE BASELINE = 8.18% MAPE Ensemble, 59 rolling days (§12.7).** **REALISTIC (non-oracle weather) counterpart = 8.81% MAPE Linear — now the best model once perfect-foresight weather is removed (§12.8)**; perfect weather was worth ≈0.3-0.8pp MAPE depending on model. Two new baselines: Linear regression, Weekly-Naive. Weighted-ensemble code removed per user request (§9.2, §8 row 18). External review logged (§12); done: easy/trivial batch (§12.5), correctness batch (§12.6), labeling+lag+baselines batch (§12.7), realistic-weather experiment (§12.8). Still open: #13 (token env var), #17 (experimental model), #18 (holdout discipline sign-off). Backup/checkpoint protocol in §13.
+**Version:** v26.19 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble. **ORACLE BASELINE = 8.18% MAPE Ensemble, 59 rolling days (§12.7).** **REALISTIC (non-oracle weather) counterpart = 8.81% MAPE Linear — now the best model once perfect-foresight weather is removed (§12.8)**; perfect weather was worth ≈0.3-0.8pp MAPE depending on model. Two new baselines: Linear regression, Weekly-Naive. Weighted-ensemble code removed per user request (§9.2, §8 row 18). External review logged (§12); done: easy/trivial batch (§12.5), correctness batch (§12.6), labeling+lag+baselines batch (§12.7), realistic-weather experiment (§12.8), holdout sign-off + print sweep + comment tightening (§12.9). Still open: #13 (token env var), #17 (experimental model). Backup/checkpoint protocol in §13.
 
 > **Standing rule:** the Renewables.ninja download code (geocoding prompt, token, API calls) is
 > owned by the user — **do not modify it** without explicit instruction. See §8 row 10.
@@ -687,15 +687,34 @@ alignment first, then one clean rerun)
 
 ### 12.4 Open questions blocking Tier 1 (need answers before implementation, not resolvable from
 the data or code alone)
-1. **ETESA's `H1` hour convention** (start-of-interval vs. end-of-interval) — determines whether
-   #11 is a real 1-hour misalignment bug or a non-issue. Needs authoritative source, not a guess.
-2. **What "clean holdout" concretely means** going forward — does the working distinction in #18
-   (re-run once after correctness fixes, then freeze the test window for all future roadmap
-   decisions) match what the user wants, or is a genuinely new/different period expected?
+1. ~~**ETESA's `H1` hour convention**~~ **RESOLVED** (2026-07-23, user-provided) — hour-ending;
+   fixed, see §12.6.
+2. ~~**What "clean holdout" concretely means**~~ **RESOLVED / SIGNED OFF** (2026-07-24) — see the
+   holdout discipline statement below.
 3. **Whether an LSTM/alternative model was ever actually run** outside this repo (recoverable) or
-   whether #17 is new work to scope from scratch.
-4. **Lag semantics intent** (#9) — input-time-relative (`shift(168)`, current) vs. target-time-relative
-   (`shift(144)`) framing — a modeling choice, not purely a bug, needs a decision either way.
+   whether #17 is new work to scope from scratch. **Still open.**
+4. ~~**Lag semantics intent**~~ **RESOLVED** (2026-07-23) — switched to target-relative
+   (144/312), evidence-based, see §12.7.
+
+**Holdout discipline — signed off (2026-07-24):** the framing proposed when this review was first
+logged is now the adopted rule, not just a working proposal. Stated plainly: the Nov–Dec test
+window has been re-evaluated multiple times this session, but every re-evaluation was to fix a
+*correctness* bug (calibration leakage, hour alignment, lag semantics) — never to compare modeling
+variants and keep the best-scoring one. That distinction is what keeps the test period meaningful:
+fixing a leak and re-measuring isn't "tuning against the test set," because the fix is justified by
+a data-generating-process argument independent of whether the resulting score went up or down (and
+here it went up — the honest numbers are worse than the leaky ones, which is itself evidence the
+fixes weren't chosen to flatter the score).
+**Going forward, the rule is: no more correctness-driven re-evaluations are expected** (the known
+Tier-1/Tier-2 leakage and alignment issues are now fixed), so from this point on, any *new* roadmap
+item (P4 ramp features, P6 quantile/Huber loss, hydro-regime clustering, or anything else added to
+the optimization roadmap in §10) must be evaluated on the **validation split only** — never the
+test period — while deciding whether to keep or discard it. The test period is touched exactly
+once more: a single final confirmatory run, after the roadmap is otherwise settled, for the number
+that goes in the thesis. If a future correctness bug is found (not a modeling choice, an actual
+bug), fixing it and re-measuring once against the same test window remains legitimate under this
+same reasoning — but trying five variants of P4 and keeping whichever scores best on test would
+not be.
 
 ### 12.5 Implementation log — Easy/Trivial batch (2026-07-23)
 
@@ -911,6 +930,37 @@ they must be numerically identical between the oracle and realistic runs — con
 **How to run:** `python3 experiments/realistic_weather_ablation.py` from the repo root (same
 requirements as the main script; calls `input()` and the live Renewables.ninja API, same
 convention as `MACHINE_LEARNING_RESIDUAL_DEMAND.py`).
+
+### 12.9 Holdout sign-off, print sweep, comment tightening (2026-07-24)
+
+**#18 holdout discipline** — formally signed off, see the "Holdout discipline" statement now in
+§12.4: no more test-period re-evaluations are expected (known Tier-1/Tier-2 issues are fixed); any
+new roadmap item from here on is judged on the validation split only, with the test period touched
+once more, at the very end, for the thesis number.
+
+**#20 print-volume sweep (broader pass, beyond the one dataframe dump removed in §12.5).** Surveyed
+every `print(...)` in the main script against the bar "clear data check or final result." Removed
+two genuinely low-value ones — `print(df.dtypes)` (a bare informational dump, nothing validated)
+and the "Data structures initialised — 2 models × 4 metrics" three-line status block (pure
+narration, redundant with the real shape/feature-count assertion a few cells later). Also fixed the
+notebook-only equivalent of the dtypes print: a trailing bare `df.dtypes` expression (Jupyter's
+implicit display), same issue as the earlier bare-`df` fix in §12.5. Everything else surveyed —
+`describe()`, `isnull().sum()`, the stationarity table, the correlation printout, the XGBoost sweep
+table, all train/test/overfit/model-selection prints, the final results tables — was judged a
+genuine, bounded data check or result and left alone.
+
+**Comment tightening.** Reviewed the largest comment blocks added earlier this session for the
+leakage/alignment fixes (calibration header, lag-semantics constants, hour-ending convention,
+`origin_time`/`target_time`, the `hidro_mw` decision) and trimmed prose while keeping every load-
+bearing fact: the leak mechanism, the fix rationale, the empirical evidence (correlation numbers,
+row counts), and revert instructions. The calibration header now points to
+`rebuild_calibration_features()`'s docstring for the full derivation instead of repeating it, since
+that docstring already carries the complete explanation. Net: 30 lines removed from the `.py`
+(59 deletions, 29 tightened insertions) with no loss of the reasoning a future reviewer would need.
+
+Synced into `.py` and `.ipynb`, `py_compile` + per-cell `ast.parse` clean on both. No rolling-loop
+rerun performed for this batch — pure comment/print changes with no logic touched, and no variable
+removed that other code depends on, so `py_compile`/`ast.parse` are sufficient verification here.
 
 ---
 

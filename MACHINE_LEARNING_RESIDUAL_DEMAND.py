@@ -39,18 +39,12 @@ LAG_1 = 24
 
 LAG_2 = 312
 LAG_3 = 144
-# TARGET-relative lags (review #9, 2026-07-23): residual_L{144,312} give the residual demand at
-# the SAME clock-hour, exactly 1 and 2 weeks before the hour being PREDICTED (target_time =
-# input + 24h), not before the input row itself. shift(168)/shift(336) — the previous values —
-# are 168h/336h before the INPUT time, which is 192h/360h (not a clean week/fortnight) before the
-# TARGET. Both framings are equally leakage-free (both look only backward from target_time); this
-# is a semantic-correctness fix, not a leakage fix. Verified empirically, TRAINING ROWS ONLY
-# (T=7000, current leak-fixed + hour-aligned pipeline): target-relative correlates meaningfully
-# stronger with the target than input-relative did —
-#   r(shift=144, target-relative 1wk) = 0.780   vs   r(shift=168, input-relative) = 0.667
-#   r(shift=312, target-relative 2wk) = 0.764   vs   r(shift=336, input-relative) = 0.651
-# To revert to the input-relative framing: LAG_2=336, LAG_3=168 (and rename residual_L312/L144
-# back to residual_L336/L168 below).
+# TARGET-relative lags (review #9, 2026-07-23): residual_L{144,312} = same clock-hour, exactly
+# 1/2 weeks before the hour being PREDICTED (target_time = input+24h). shift(168)/shift(336)
+# are that far before the INPUT instead, i.e. 192h/360h before the target — not a clean week.
+# Semantic fix, not a leakage fix (both directions are backward-only). Training-only Pearson r
+# confirms target-relative is the stronger predictor: r(144)=0.780 vs r(168)=0.667;
+# r(312)=0.764 vs r(336)=0.651. Revert: LAG_2=336, LAG_3=168 (rename residual_L312/L144 back).
 
 MAX_LAG = LAG_2
 # Burn-in: LAG_2=312 is still the largest backward-looking shift used anywhere (> LAG_3=144,
@@ -231,17 +225,13 @@ demanda_long  = demanda_long.dropna(subset=['fecha_dt'])
 demanda_long['hora_num'] = (
     demanda_long['hora_str'].str.extract(r'(\d+)').astype(float).fillna(0).astype(int)
 )
-# HOUR-ENDING convention (review #11, resolved 2026-07-23): ETESA labels hours by when they
-# END. The generation file runs 2025-01-01 01:00 → 2026-01-01 00:00 = exactly 8760 rows
-# (365×24), the unambiguous signature of hour-ending labeling (the first hour 00:00–01:00 is
-# stamped 01:00). The demand file's 'H1' is therefore "hora 1" = the hour ENDING at 01:00, so
-# H_k maps to k:00 — H1→01:00, …, H24→ next-day 00:00. (The previous code subtracted 1, mapping
-# H1→00:00, which put demand one hour BEFORE generation: generation's first hour then joined
-# demand's H2 instead of H1, corrupting the target demanda_residual = demanda − solar − eólica
-# by mixing two different physical hours. To revert to the old hour-beginning mapping, restore
-# the `- 1`.) NOTE (still open): the Renewables.ninja weather timestamps may follow an
-# hour-BEGINNING convention; that is a separate feature-alignment question from this target fix
-# and is left unchanged here — flagged for a future pass.
+# HOUR-ENDING convention (review #11, resolved 2026-07-23): the generation file runs
+# 2025-01-01 01:00 → 2026-01-01 00:00 = exactly 8760 rows (365×24) — only possible if hours are
+# labeled by when they END (00:00–01:00 stamped 01:00). So H_k maps to k:00, not (k-1):00 as
+# before — the old `-1` put demand an hour early, joining generation's hour to the WRONG demand
+# hour and corrupting demanda_residual = demanda − solar − eólica. Revert: restore the `- 1`.
+# Still open: Renewables.ninja weather timestamps may use hour-BEGINNING instead — a separate
+# alignment question, left unchanged here.
 
 demanda_long['timestamp'] = (
     demanda_long['fecha_dt'] + pd.to_timedelta(demanda_long['hora_num'], unit='h')
@@ -289,18 +279,11 @@ print(f'Index OK: {len(_idx):,} unique, gap-free hourly rows '
 
 # ────────────────────────────────────────────────────────────────────────────
 # calibration — LEAKAGE-SAFE, re-fit per rolling window (review #3, 2026-07-23)
-# The Renewables.ninja MERRA-2 irradiance differs from what the real Panama plants see, so we
-# scale it by a real/ninja factor. The OLD code computed that factor as a per-hour ratio over
-# the FULL YEAR (real_solar[t] / ninja_solar[t]) and baked it into irradiance_direct/diffuse.
-# Because irradiance_*_h24[t] = irradiance_*[t+24], that made the horizon weather features
-# proportional to real_solar[t+24] — a term that DIRECTLY defines the target
-# (demanda_residual_h24 = demanda − solar − eólica at t+24). So the calibration leaked the
-# target into the inputs, on top of the already-disclosed perfect-foresight weather assumption.
-#
-# Fix: do NOT calibrate here. Keep the raw ninja irradiance + ninja solar, and re-fit the factor
-# from TRAINING ROWS ONLY inside each rolling window (rebuild_calibration_features, called by
-# get_targets_features) — a per-hour-of-day factor from real/ninja on rows < T, applied using
-# only ninja inputs, never target-hour real solar. Same discipline as the hydro profile.
+# Calibrating irradiance against real solar at the SAME rows later used to build the h24
+# horizon features would leak the target (real solar at t+24) into the inputs. Fix: no
+# calibration here — keep raw ninja values; the actual factor is fit training-only, per
+# rolling window, in rebuild_calibration_features() below (see its docstring for the full
+# derivation). Same discipline as the hydro profile rebuild.
 # ────────────────────────────────────────────────────────────────────────────
 
 # Preserve the raw (uncalibrated) ninja signals the per-window calibration needs downstream.
@@ -347,9 +330,6 @@ print(df.isnull().sum())
 df.reset_index(inplace=True)
 # Move the datetime index back into a regular column called 'local_time'.
 # This allows us to use .dt accessor methods to extract hour, month, day-of-week.
-
-print(df.dtypes)
-# Inspect the column data types.
 
 # ────────────────────────────────────────────────────────────────────────────
 # feature engineering — calendar and cyclic features
@@ -477,15 +457,12 @@ df['irr_diffuse_ninja_h24']  = df['irr_diffuse_ninja'].shift(-HORIZON)
 # until re-measured on the corrected pipeline.
 
 # Hydro dispatch features
-# Decision (external review, 2026-07-23): hidro_mw stays in the model as a raw current-hour
-# feature (see cols_order below) — it is NOT dropped in favor of the four derived features
-# below. hidro_mw + termica_mw = demanda_residual by definition, but termica_mw is not in this
-# dataset, so hidro_mw alone does not perfectly determine demanda_residual (only a variable
-# fraction of it) — it is not "perfect collinearity". Its measured XGBoost importance is low
-# (gain ≈ 0.005) mainly because demanda_residual is already a feature and captures the current
-# supply/demand balance more completely; hidro_mw is largely redundant with it, not unsafe.
-# The four derived features below add hydro-specific information (share, trend, seasonal
-# deviation) that the raw level alone doesn't carry.
+# Decision (external review, 2026-07-23): hidro_mw stays as a raw feature (see cols_order below).
+# hidro_mw + termica_mw = demanda_residual by definition, but termica_mw isn't in this dataset,
+# so hidro_mw alone doesn't fully determine the target — not "perfect collinearity" as an earlier
+# comment claimed. Its low XGBoost importance (gain ≈ 0.005) is redundancy with the already-present
+# demanda_residual feature, not danger. The four derived features below add hydro-specific
+# information (share, trend, seasonal deviation) the raw level doesn't carry on its own.
 
 df['hidro_fraction_L24'] = (
     df['hidro_mw'].shift(LAG_1) /
@@ -548,14 +525,11 @@ df             = df.iloc[MAX_LAG:-HORIZON].reset_index(drop=True)
 datetime_index = datetime_index.iloc[MAX_LAG:-HORIZON].reset_index(drop=True)
 # Also trim datetime_index to match the trimmed df row-for-row.
 
-# origin_time / target_time (review #7/#8, 2026-07-23): row i's features are all known as of
-# origin_time[i] (= datetime_index[i], the row's own timestamp — "now"). The value the model
-# actually predicts at row i, demanda_residual_h24[i] = demanda_residual[i+24], occurs 24 hours
-# LATER, at target_time[i] = origin_time[i] + 24h. A 24-row block starting at row T_day therefore
-# represents ONE COMPLETED DAY of already-known inputs (origin_time[T_day .. T_day+23]), used to
-# forecast the FOLLOWING day (target_time[T_day .. T_day+23]). Forecast-vs-actual plots and the
-# forecasts DataFrame below are indexed by target_time, not origin_time, so the x-axis reads the
-# day actually being predicted rather than the day the forecast was issued from.
+# origin_time / target_time (review #7/#8, 2026-07-23): origin_time[i] = "now", when row i's
+# features are known. The model's prediction at row i is for target_time[i] = origin_time[i]+24h.
+# So a 24-row block starting at T_day is ONE COMPLETED DAY of known inputs (origin_time), used
+# to forecast the FOLLOWING day (target_time). Plots/forecasts below index by target_time, so
+# the x-axis reads the day being predicted, not the day the forecast was issued from.
 origin_time = datetime_index
 target_time = datetime_index + pd.Timedelta(hours=HORIZON)
 
@@ -745,10 +719,6 @@ training_wape  = pd.DataFrame(index=[target_h24], columns=_cols)
 training_smape = pd.DataFrame(index=[target_h24], columns=_cols)
 training_r2    = pd.DataFrame(index=[target_h24], columns=_cols)
 
-
-print('Data structures initialised — 2 models × 4 metrics.')
-print(f'Features: {len(features_h24)} flat (lagged approach)')
-print(f'Models:   {_cols}')
 
 # ────────────────────────────────────────────────────────────────────────────
 # Feature Extraction via Lagged Approach
