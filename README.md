@@ -24,6 +24,7 @@ i.e. the portion of demand that hydro + thermal must supply once variable renewa
 | `DEM2025.csv` | ETESA hourly demand (input) |
 | `solar_eolica_hidro_horario_2025.csv` | Real ETESA generation (input) |
 | `renewables_ninja_2025.csv` | Export of the downloaded API weather data, written by each run (traceability of the exact inputs used) |
+| `experiments/realistic_weather_ablation.py` | Second experiment: same pipeline, without the perfect-foresight `*_h24` weather features — see `MACHINE LEARNING RD CONTEXT.md` §12.8 for the oracle-vs-realistic comparison |
 
 ## How to Run
 

@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.17 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble. **CURRENT BASELINE = 8.18% MAPE Ensemble, 59 rolling days (§12.7)** — supersedes §12.6's 8.33%/58-day figure (test period grew 1 day after the #9 lag fix shrank burn-in) and the original leaky 6.78% (§9.2, §0). Two new baselines added: Linear regression (8.47% MAPE — close behind DNN/XGB) and Weekly-Naive (12.26% — worse than simple persistence). Weighted-ensemble code removed per user request (§9.2, §8 row 18). External review logged (§12); done: easy/trivial batch (§12.5), correctness batch (§12.6), labeling+lag+baselines batch (§12.7). Still open: #4 (realistic no-oracle-weather run), #13 (token env var), #17 (experimental model), #18 (holdout discipline sign-off). Backup/checkpoint protocol in §13.
+**Version:** v26.18 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble. **ORACLE BASELINE = 8.18% MAPE Ensemble, 59 rolling days (§12.7).** **REALISTIC (non-oracle weather) counterpart = 8.81% MAPE Linear — now the best model once perfect-foresight weather is removed (§12.8)**; perfect weather was worth ≈0.3-0.8pp MAPE depending on model. Two new baselines: Linear regression, Weekly-Naive. Weighted-ensemble code removed per user request (§9.2, §8 row 18). External review logged (§12); done: easy/trivial batch (§12.5), correctness batch (§12.6), labeling+lag+baselines batch (§12.7), realistic-weather experiment (§12.8). Still open: #13 (token env var), #17 (experimental model), #18 (holdout discipline sign-off). Backup/checkpoint protocol in §13.
 
 > **Standing rule:** the Renewables.ninja download code (geocoding prompt, token, API calls) is
 > owned by the user — **do not modify it** without explicit instruction. See §8 row 10.
@@ -865,6 +865,52 @@ and `forecasts.csv` (1416 rows, `target_time`/`origin_time` both present) writte
 
 **Revert:** `git revert d106a7c` restores input-relative lags (168/336), origin-time-indexed
 forecasts, removes the weekly-naive/linear baseline rows, and restores the full-dataframe print.
+
+### 12.8 Realistic (non-oracle) weather experiment — #4 (2026-07-23)
+
+**File:** `experiments/realistic_weather_ablation.py` (new, permanent — not scratch). A standalone
+script, not merged into the main pipeline, per the "keep experiments in the repo, clearly labeled"
+policy (§10, bottom). Reuses the main pipeline's leakage-safe calibration rebuild, hydro-profile
+rebuild, hour-ending demand alignment, and index-integrity check **verbatim** — only one structural
+change: the four `*_h24` weather features (`irradiance_direct_h24`, `irradiance_diffuse_h24`,
+`temperature_h24`, `wind_speed_h24`) are dropped entirely (26 model features instead of 30).
+Current, non-shifted weather stays — that's legitimately observed "now" data, same class as
+`demanda_residual` or `hidro_mw`. No fabricated forecast-error noise was added in place of the
+dropped features — we have no real operational NWP data for Panama for this period, so omitting
+them is the honest choice over inventing numbers. Results write to `results_summary_realistic.csv`
+/ `forecasts_realistic.csv`, distinct from the main pipeline's output files.
+
+**Sanity check (passed):** `Naive` and `Weekly-Naive` don't use the weather features at all, so
+they must be numerically identical between the oracle and realistic runs — confirmed exact match
+(11.59/10.06/114.7/163.0 and 12.26/10.70/121.9/172.0 respectively, both runs, all 4 metrics).
+
+**Full comparison (both runs, same 59-day corrected data):**
+
+| Model | Oracle MAPE/WAPE/MAE/RMSE | Realistic MAPE/WAPE/MAE/RMSE | MAPE gap |
+|---|---|---|---|
+| DNN | 8.41 / 7.16 / 81.6 / 114.9 | 9.20 / 7.79 / 88.7 / 124.6 | **+0.79 pp** |
+| XGBoost | 8.34 / 7.10 / 81.0 / 115.2 | 8.93 / 7.50 / 85.5 / 123.6 | **+0.59 pp** |
+| **Ensemble** | **8.18** / 6.95 / 79.2 / 112.7 | 8.91 / 7.49 / 85.3 / 121.6 | **+0.73 pp** |
+| Linear | 8.47 / 7.26 / 82.7 / 116.0 | **8.81** / 7.51 / 85.6 / 121.2 | **+0.34 pp** |
+| Naive | 11.59 / 10.06 / 114.7 / 163.0 | 11.59 / 10.06 / 114.7 / 163.0 | 0 (expected — no weather input) |
+| Weekly-Naive | 12.26 / 10.70 / 121.9 / 172.0 | 12.26 / 10.70 / 121.9 / 172.0 | 0 (expected — no weather input) |
+
+**What this means for the thesis:**
+- **The honest cost of the perfect-foresight weather assumption is ≈0.3–0.8 pp MAPE**, model-
+  dependent. That's the number to cite when the oracle result is presented — it directly answers
+  "how much of your accuracy comes from cheating with future weather."
+- **It is not the dominant driver of accuracy.** Both realistic-scenario headline numbers (8.8–9.2%)
+  still comfortably beat naive persistence (11.6%) by a wide margin — most of the pipeline's value
+  survives without perfect weather knowledge.
+- **A genuinely new, citable finding: in the realistic scenario, Linear regression (8.81%) becomes
+  the single best-performing model, ahead of the Ensemble (8.91%).** DNN had the largest gap
+  (+0.79pp) — it leaned on the perfect-weather features the most, and loses the most without them.
+  Linear had the smallest gap (+0.34pp) — it relied on them least, and holds up best. Model
+  complexity's advantage shrinks, and here reverses, once the oracle weather assumption is removed.
+
+**How to run:** `python3 experiments/realistic_weather_ablation.py` from the repo root (same
+requirements as the main script; calls `input()` and the live Renewables.ninja API, same
+convention as `MACHINE_LEARNING_RESIDUAL_DEMAND.py`).
 
 ---
 
