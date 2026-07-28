@@ -39,12 +39,10 @@ LAG_1 = 24
 
 LAG_2 = 312
 LAG_3 = 144
-# TARGET-relative lags (review #9, 2026-07-23): residual_L{144,312} = same clock-hour, exactly
-# 1/2 weeks before the hour being PREDICTED (target_time = input+24h). shift(168)/shift(336)
-# are that far before the INPUT instead, i.e. 192h/360h before the target — not a clean week.
-# Semantic fix, not a leakage fix (both directions are backward-only). Training-only Pearson r
-# confirms target-relative is the stronger predictor: r(144)=0.780 vs r(168)=0.667;
-# r(312)=0.764 vs r(336)=0.651. Revert: LAG_2=336, LAG_3=168 (rename residual_L312/L144 back).
+# TARGET-relative lags: residual_L{144,312} give the residual demand at the SAME clock-hour,
+# exactly 1/2 weeks before the hour being PREDICTED (target_time = input + 24h), not before the
+# input row itself. Training-only Pearson r confirms this is the stronger framing:
+# r(144) = 0.780, r(312) = 0.764.
 
 MAX_LAG = LAG_2
 # Burn-in: LAG_2=312 is still the largest backward-looking shift used anywhere (> LAG_3=144,
@@ -216,8 +214,8 @@ _bad_dates = sorted(demanda_long.loc[demanda_long['fecha_dt'].isna(), 'fecha'].u
 if _bad_dates:
     print(f'WARNING: dropping {len(_bad_dates)} unparseable date(s) from DEM2025.csv: {_bad_dates}')
     # Known case: the source export contains 02/29/2025, which does not exist (2025 is not a
-    # leap year — confirmed via external review, 2026-07-23). Treated as a source data error
-    # in ETESA's export and dropped here; surfaced explicitly rather than silently discarded.
+    # leap year). Treated as a source data error and dropped here, surfaced explicitly
+    # rather than silently discarded.
 
 demanda_long  = demanda_long.dropna(subset=['fecha_dt'])
 # Parse dates; drop any rows where the date cannot be converted.
@@ -225,13 +223,10 @@ demanda_long  = demanda_long.dropna(subset=['fecha_dt'])
 demanda_long['hora_num'] = (
     demanda_long['hora_str'].str.extract(r'(\d+)').astype(float).fillna(0).astype(int)
 )
-# HOUR-ENDING convention (review #11, resolved 2026-07-23): the generation file runs
-# 2025-01-01 01:00 → 2026-01-01 00:00 = exactly 8760 rows (365×24) — only possible if hours are
-# labeled by when they END (00:00–01:00 stamped 01:00). So H_k maps to k:00, not (k-1):00 as
-# before — the old `-1` put demand an hour early, joining generation's hour to the WRONG demand
-# hour and corrupting demanda_residual = demanda − solar − eólica. Revert: restore the `- 1`.
-# Still open: Renewables.ninja weather timestamps may use hour-BEGINNING instead — a separate
-# alignment question, left unchanged here.
+# HOUR-ENDING convention: the generation file runs 2025-01-01 01:00 → 2026-01-01 00:00 =
+# exactly 8760 rows (365×24) — only possible if hours are labeled by when they END (00:00–01:00
+# stamped 01:00). So H_k maps to k:00. Note: Renewables.ninja weather timestamps may use
+# hour-BEGINNING instead — a separate alignment question, left unchanged here.
 
 demanda_long['timestamp'] = (
     demanda_long['fecha_dt'] + pd.to_timedelta(demanda_long['hora_num'], unit='h')
@@ -256,10 +251,8 @@ df = df_combined
 print('Columns:', df.columns.tolist())
 
 # ────────────────────────────────────────────────────────────────────────────
-# Index integrity (review #12): every lag/shift feature below assumes "N rows back =
-# N hours back". That only holds if the hourly index is complete (no gaps) and unique
-# (no duplicate timestamps). Assert it explicitly rather than trusting row position —
-# a single missing or duplicated hour would silently make a 24-row shift ≠ 24 hours.
+# Index integrity: every lag/shift feature below assumes "N rows back = N hours back". That
+# only holds if the hourly index is complete (no gaps) and unique (no duplicate timestamps).
 _idx = pd.DatetimeIndex(df.index)
 _dupes = _idx[_idx.duplicated()]
 assert _dupes.empty, f'Duplicate timestamps in the hourly index: {list(_dupes[:5])}'
@@ -272,13 +265,8 @@ assert _missing.empty, (
 print(f'Index OK: {len(_idx):,} unique, gap-free hourly rows '
       f'({_idx.min()} → {_idx.max()}).')
 
-# HOUR CONVENTION — RESOLVED (review #11, 2026-07-23): ETESA uses HOUR-ENDING labeling. The
-# generation file spans 2025-01-01 01:00 → 2026-01-01 00:00 = 8760 rows (365×24), which only
-# fits hour-ending (first hour 00:00–01:00 stamped 01:00). The demand loader above was updated
-# to match (H_k → k:00). See the demand-loading block for the full rationale and revert note.
-
 # ────────────────────────────────────────────────────────────────────────────
-# calibration — LEAKAGE-SAFE, re-fit per rolling window (review #3, 2026-07-23)
+# calibration — LEAKAGE-SAFE, re-fit per rolling window
 # Calibrating irradiance against real solar at the SAME rows later used to build the h24
 # horizon features would leak the target (real solar at t+24) into the inputs. Fix: no
 # calibration here — keep raw ninja values; the actual factor is fit training-only, per
@@ -383,9 +371,6 @@ df = df.drop(columns=['local_time'])
 # then remove it from the feature DataFrame.
 
 print(f'Holidays 2025: {len(_panama_holidays_2025)} days → {df.is_holiday.sum()} hours marked')
-# (review #20, 2026-07-23: removed a `print(df.to_string())` here — an unbounded dump of the
-# entire ~8,700-row dataframe with no diagnostic purpose stated. The bounded summary prints
-# elsewhere — df.describe(), df.isnull().sum(), df.dtypes, the stationarity table — stay.)
 
 # ────────────────────────────────────────────────────────────────────────────
 # target variable and feature construction
@@ -415,24 +400,21 @@ df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
 # Encode the month of year cyclically. Period = 12 months.
 
 # ── Lagged target features (Lagged Approach)
-# Training-only Pearson correlations with target (review #9, see LAG_2/LAG_3 comment above for
-# the input- vs target-relative measurement): r(L144)=0.780 > r(L312)=0.764 > r(L48)=0.575
+# Training-only Pearson correlations with target: r(L144)=0.780 > r(L312)=0.764 > r(L48)=0.575
 # r(L24) ≈ 0  →  dropped (nearly collinear with the current-hour 'demanda_residual').
 
 df['residual_L312'] = df['demanda_residual'].shift(LAG_2)
 # 312-hour lag: residual demand at the SAME clock-hour, exactly 2 weeks before the hour being
-# PREDICTED (target-relative, review #9) — captures the biweekly hydroelectric dispatch cycle.
+# predicted — captures the biweekly hydroelectric dispatch cycle.
 
 df['residual_L144'] = df['demanda_residual'].shift(LAG_3)
 # 144-hour lag: residual demand at the SAME clock-hour, exactly 1 week before the hour being
-# PREDICTED (target-relative, review #9). Strongest single lag predictor (r = 0.780).
+# predicted. Strongest single lag predictor (r = 0.780).
 
 df['residual_L48']  = df['demanda_residual'].shift(48)
 # 48-hour lag (2 days): captures the mid-week demand build-up pattern.
 
 # NWP Horizon features at t+24 — the h=24 meteorology at the prediction target time.
-# irradiance_direct_h24 is XGBoost feature importance #3 (gain = 0.080); adding these 4
-# features reduced DNN MAPE from ~9.3 % to 7.08 % (−2.35 pp).
 #
 # ── LIMITATION: PERFECT-FORESIGHT WEATHER ─────────────────────────────────────
 # These four features are built with shift(-HORIZON), i.e. the TRUE future value of
@@ -452,17 +434,13 @@ df['wind_speed_h24']         = df['wind_speed'].shift(-HORIZON)
 # columns from ninja × a training-only factor, with no NaN at the tail. Not fed to the models.
 df['irr_direct_ninja_h24']   = df['irr_direct_ninja'].shift(-HORIZON)
 df['irr_diffuse_ninja_h24']  = df['irr_diffuse_ninja'].shift(-HORIZON)
-# NOTE: the historical "−2.35 pp from the h24 weather block" gain (comment above) predates the
-# calibration-leakage fix (#3) and is partly attributable to that leak — treat it as suspect
-# until re-measured on the corrected pipeline.
 
 # Hydro dispatch features
-# Decision (external review, 2026-07-23): hidro_mw stays as a raw feature (see cols_order below).
-# hidro_mw + termica_mw = demanda_residual by definition, but termica_mw isn't in this dataset,
-# so hidro_mw alone doesn't fully determine the target — not "perfect collinearity" as an earlier
-# comment claimed. Its low XGBoost importance (gain ≈ 0.005) is redundancy with the already-present
-# demanda_residual feature, not danger. The four derived features below add hydro-specific
-# information (share, trend, seasonal deviation) the raw level doesn't carry on its own.
+# hidro_mw stays as a raw feature (see cols_order below). hidro_mw + termica_mw = demanda_residual
+# by definition, but termica_mw isn't in this dataset, so hidro_mw alone doesn't fully determine
+# the target — not perfect collinearity. Its low XGBoost importance (gain ≈ 0.005) is redundancy
+# with the already-present demanda_residual feature, not danger. The four derived features below
+# add hydro-specific information (share, trend, seasonal deviation) the raw level doesn't carry.
 
 df['hidro_fraction_L24'] = (
     df['hidro_mw'].shift(LAG_1) /
@@ -506,7 +484,7 @@ cols_order = [
     # Calendar features (11)
     'month', 'hour', 'hour_sin', 'hour_cos', 'month_sin', 'month_cos',
     'is_weekday', 'hour_weekday', 'is_holiday', 'dow_sin', 'dow_cos',
-    # Lagged target — Lagged Approach, snn_forec (4)
+    # Lagged target — Lagged Approach (4)
     'demanda_residual',
     'residual_L48', 'residual_L312', 'residual_L144',
     # Hydro dispatch state (4)
@@ -525,7 +503,7 @@ df             = df.iloc[MAX_LAG:-HORIZON].reset_index(drop=True)
 datetime_index = datetime_index.iloc[MAX_LAG:-HORIZON].reset_index(drop=True)
 # Also trim datetime_index to match the trimmed df row-for-row.
 
-# origin_time / target_time (review #7/#8, 2026-07-23): origin_time[i] = "now", when row i's
+# origin_time / target_time: origin_time[i] = "now", when row i's
 # features are known. The model's prediction at row i is for target_time[i] = origin_time[i]+24h.
 # So a 24-row block starting at T_day is ONE COMPLETED DAY of known inputs (origin_time), used
 # to forecast the FOLLOWING day (target_time). Plots/forecasts below index by target_time, so
@@ -624,7 +602,7 @@ print(r['demanda_residual_h24'].drop('demanda_residual_h24').sort_values(ascendi
 # Print the correlation of each feature with the target, sorted highest-to-lowest.
 # Key expected findings (from the actual run):
 #   demanda_residual (current):   r ≈ 0.69   (strongest single predictor)
-#   residual_L144:                r ≈ 0.78 (training-only; strongest lag, target-relative — review #9)
+#   residual_L144:                r ≈ 0.78 (training-only; strongest lag, target-relative)
 #   residual_L312:                r ≈ 0.76 (training-only, target-relative)
 #   irradiance_direct_h24:        negative   (high solar → low residual demand)
 
@@ -701,7 +679,7 @@ forecasts = {
     for k in predictions
 }
 # Each DataFrame has one column (target_h24) and one row per hour in the full dataset, indexed
-# by target_time (review #7) — the calendar hour actually being predicted, not the hour the
+# by target_time — the calendar hour actually being predicted, not the hour the
 # forecast was issued from. Rows in the training window stay NaN; the rolling loop fills in the
 # test window. All downstream reads use .iloc (positional), so this label change is safe.
 
@@ -769,15 +747,12 @@ def rebuild_calibration_features(df_in, T):
     Re-fit the ninja→real solar calibration from TRAINING ROWS ONLY (rows < T) and apply it to
     the four irradiance features, using ONLY ninja inputs — never target-hour real solar.
 
-    Why this exists — leakage prevention (review #3):
-    the old code scaled irradiance by a per-hour real/ninja ratio computed over the FULL year;
-    via the shift(-HORIZON) that builds irradiance_*_h24, that made the horizon weather features
-    proportional to real_solar[t+24], a term that defines the target. Here the factor is a
-    per-hour-of-day mean of (real_solar / ninja_solar) fitted on rows < T only (daytime rows,
-    where ninja_solar > 0) and applied by calendar hour. Because the horizon is +24 h (a whole
-    day), the target's clock-hour equals the current row's clock-hour, so the SAME hourly factor
-    correctly calibrates both the current irradiance and its _h24 shift. Applying it uses only
-    the raw ninja columns (irr_*_ninja, irr_*_ninja_h24) — no real solar from any row ≥ T.
+    Why this exists — leakage prevention: the factor is a per-hour-of-day mean of
+    (real_solar / ninja_solar) fitted on rows < T only (daytime rows, where ninja_solar > 0)
+    and applied by calendar hour. Because the horizon is +24 h (a whole day), the target's
+    clock-hour equals the current row's clock-hour, so the SAME hourly factor correctly
+    calibrates both the current irradiance and its _h24 shift. Applying it uses only the raw
+    ninja columns (irr_*_ninja, irr_*_ninja_h24) — no real solar from any row ≥ T.
 
     Returns a copy of df_in with the four irradiance_* columns overwritten for cutoff T.
     """
@@ -798,7 +773,7 @@ def rebuild_calibration_features(df_in, T):
 
 def get_targets_features(df_in, T, scale=False):
     """
-    Feature extraction — Lagged Approach (snn_forec pattern).
+    Feature extraction — Lagged Approach.
 
     Parameters
     ----------
@@ -862,9 +837,8 @@ print(features_h24)
 # - Validation split = 10 % (last 10 % of the training window, preserving temporal order).
 # - Both X and Y are scaled with StandardScaler (for neural networks).
 # - Seed 42 is fixed at each iteration so results are reproducible.
-# **Best result: 7.08 % MAPE, WAPE=0.0616, R²=0.7765, overfit=0.79 pp.**
-# Key finding: adding NWP horizon features reduced DNN MAPE from ~9.3 % to 7.08 % (−2.35 pp).
-# meteorological forecasts outperforms sequential models without them.
+# Adding the NWP horizon (*_h24) weather features noticeably improves DNN accuracy over
+# using calendar and lag features alone.
 # ────────────────────────────────────────────────────────────────────────────
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -931,7 +905,7 @@ naive_actual = df[target_h24].iloc[T:T + n_test_hours].values
 naive_mape, naive_wape, naive_smape, naive_r2 = compute_metrics(naive_actual, naive_preds)
 print(f'\nNaive: MAPE={naive_mape:.2%}  WAPE={naive_wape:.4f}  sMAPE={naive_smape:.2%}  R²={naive_r2:.4f}')
 
-# ── Weekly-naive benchmark (review #19b): predict the SAME clock-hour, exactly one week
+# ── Weekly-naive benchmark: predict the SAME clock-hour, exactly one week
 # before the TARGET hour. residual_L144 already IS this value — it's shift(144) of
 # demanda_residual, and 144h before origin_time equals exactly 168h (1 week) before
 # target_time (= origin_time + 24h) — see the LAG_2/LAG_3 comment above. No new computation
@@ -990,8 +964,8 @@ for day_idx in tqdm(range(n_test_days), desc='DNN rolling h=24'):
         index=target_time[:T_day]
     )
     # Training-set predictions: inverse-transform from the scaled space back to MW.
-    # index = target_time (review #7) — the hour each prediction is actually FOR, not the
-    # training row's own origin hour.
+    # index = target_time — the hour each prediction is actually FOR, not the training
+    # row's own origin hour.
 
     df_Y_pred2 = pd.DataFrame(
         scaler_y.inverse_transform(model.predict(X_test, verbose=0)),
@@ -999,7 +973,7 @@ for day_idx in tqdm(range(n_test_days), desc='DNN rolling h=24'):
         index=target_time[T_day:T_day + HORIZON]
     )
     # Test-set predictions (24-hour forecast): inverse-transform to MW.
-    # index = target_time (review #7) — the 24 calendar hours actually being forecast.
+    # index = target_time — the 24 calendar hours actually being forecast.
 
     forecasts['deep_network'].iloc[T_day:T_day + HORIZON] =         df_Y_pred2[target_h24].values.reshape(-1, 1)
     # Store the 24-hour forecast in the forecasts DataFrame at the correct rows.
@@ -1038,8 +1012,8 @@ pred_test    = forecasts['deep_network'][target_h24].iloc[T:T + n_test_hours].va
 # DNN forecasts for the test period, retrieved from the forecasts DataFrame.
 
 dates_test   = target_time.iloc[T:T + n_test_hours]
-# target_time labels for the test period (review #7 — x-axis is the day being predicted,
-# not the day the forecast was issued from).
+# target_time labels for the test period — x-axis is the day being predicted, not the
+# day the forecast was issued from.
 
 test_mape_dnn, test_wape_dnn, test_smape_dnn, test_r2_dnn =     compute_metrics(actual_test, pred_test)
 # Compute all four metrics for the test period.
@@ -1094,7 +1068,7 @@ pred_train   = predictions['deep_network'][-1][target_h24].values
 # Training-set predictions from the last rolling iteration (largest window).
 
 dates_train  = target_time.iloc[:T_last]
-# target_time labels for the training period (review #7).
+# target_time labels for the training period.
 
 train_mape_dnn, train_wape_dnn, train_smape_dnn, train_r2_dnn =     compute_metrics(actual_train, pred_train)
 # Training-set metrics — used in the overfitting analysis below.
@@ -1130,7 +1104,7 @@ plt.show()
 # 5.7_ Naive model benchmark
 # 5.8_ Model selection
 # All four metrics (MAPE, WAPE, sMAPE, R²) for both training and test are stored into the
-# snn_forec error DataFrames. Then we check overfitting (test MAPE − train MAPE)
+# error DataFrames. Then we check overfitting (test MAPE − train MAPE)
 # and run the model selection criteria: beat naive AND overfit < 10 pp.
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -1150,7 +1124,7 @@ errors_r2.loc[target_h24,    'deep_network'] = test_r2_dnn
 does_it_overfit_dnn = float(test_mape_dnn - train_mape_dnn)
 # Overfitting gap = test MAPE − train MAPE.
 # A positive value means the model is generalising imperfectly.
-# The snn_forec threshold is 0.10 (10 pp). DNN target: < 1 pp.
+# Threshold is 0.10 (10 pp). DNN target: < 1 pp.
 
 improvement_dnn = (naive_mape - test_mape_dnn) / naive_mape * 100
 # Percentage improvement over the naive benchmark.
@@ -1198,8 +1172,8 @@ from xgboost import XGBRegressor
 # XGBRegressor: the scikit-learn compatible XGBoost regression interface.
 
 # ────────────────────────────────────────────────────────────────────────────
-# XGBoost hyperparameter sweep (roadmap P5)
-# A direct run (v26.5) measured XGBoost's overfit gap at 2.82 pp — ~4x the DNN's 0.73 pp —
+# XGBoost hyperparameter sweep
+# A direct run measured XGBoost's overfit gap at 2.82 pp — ~4x the DNN's 0.73 pp —
 # at nearly the same test MAPE, meaning the original config (max_depth=5, reg_alpha=0.1,
 # reg_lambda=1.0) fits training data harder than it needs to. This sweep searches a small
 # grid using ONLY the FIRST rolling window's (T, not T_last) internal validation split — the
@@ -1344,7 +1318,7 @@ pred_test_xgb   = forecasts['xgboost'][target_h24].iloc[T:T + n_test_hours].valu
 # XGBoost day-ahead forecasts for the test period.
 
 dates_test_xgb  = target_time.iloc[T:T + n_test_hours]
-# target_time labels for the test period (review #7).
+# target_time labels for the test period.
 
 test_mape_xgb, test_wape_xgb, test_smape_xgb, test_r2_xgb =     compute_metrics(actual_test_xgb, pred_test_xgb)
 # All four metrics for the test period.
@@ -1448,7 +1422,7 @@ importance_xgb = pd.Series(
 plt.figure(figsize=(9, 7))
 importance_xgb.plot(kind='barh', color='darkorange')
 # Horizontal bar chart: each bar = one feature, length = importance gain.
-plt.title(f'XGBoost h=24 — Feature Importance v26 (T={T_last})')
+plt.title(f'XGBoost h=24 — Feature Importance (T={T_last})')
 plt.xlabel('Importance (gain)')
 plt.tight_layout()
 plt.show()
@@ -1516,7 +1490,7 @@ else:
 fig, axes = plt.subplots(1, 2, figsize=(16, 5))
 # One panel per model, side by side for direct visual comparison.
 
-dates_plot  = target_time.iloc[T:T + n_test_hours]  # review #7: x-axis = day being predicted
+dates_plot  = target_time.iloc[T:T + n_test_hours]  # x-axis = day being predicted
 actual_plot = df[target_h24].iloc[T:T + n_test_hours].values
 
 all_preds = {
@@ -1539,13 +1513,13 @@ for ax, (name, preds), color in zip(axes, all_preds.items(), ['orange', 'darkora
     # individual forecast cycles unreadable.
 
 plt.suptitle(
-    'v26 — DNN vs XGBoost | Lagged Approach | 30 Features | First 7 Test Days',
+    'DNN vs XGBoost | Lagged Approach | 30 Features | First 7 Test Days',
     fontsize=12, y=1.02)
 plt.tight_layout()
 plt.show()
 
 # ────────────────────────────────────────────────────────────────────────────
-# Linear regression baseline (review #19b)
+# Linear regression baseline
 # A simple OLS model, walk-forward rolling like DNN/XGBoost (same leakage-safe
 # get_targets_features per T_day — training-only calibration/hydro rebuild included), to show
 # whether DNN/XGBoost actually add value over something much simpler than persistence. Test-set
@@ -1581,15 +1555,9 @@ _test_actual = df[target_h24].iloc[T:T + n_test_hours].values.astype(float)
 _pred_dnn = forecasts['deep_network'][target_h24].iloc[T:T + n_test_hours].values.astype(float)
 _pred_xgb = forecasts['xgboost'][target_h24].iloc[T:T + n_test_hours].values.astype(float)
 
-# Ensemble (roadmap P3): unweighted mean of the two models' stored forecasts.
+# Ensemble: unweighted mean of the two models' stored forecasts.
 # No retraining involved — the DNN and XGBoost miss on different hours, so
 # averaging tends to cancel part of each model's error.
-#
-# A validation-tuned WEIGHTED variant (search w minimizing validation WAPE, leakage-free —
-# see MACHINE LEARNING RD CONTEXT.md sections 8 and 9.2) was tried and removed: the search
-# correctly picked w=0.30 (favor XGBoost) on validation data, but that weight did not beat
-# this flat 0.5/0.5 average on the actual test set. Kept the simpler, better-performing
-# version; the negative result is documented in CONTEXT.md rather than carried in code.
 _pred_ens = 0.5 * (_pred_dnn + _pred_xgb)
 
 _summary_rows = {
@@ -1617,16 +1585,14 @@ results_summary = pd.DataFrame(
 print('Test-period results (h=24, ' + f'{n_test_days} rolling days):')
 print(results_summary.to_string())
 
-# Persist this run's metrics and forecasts to disk (external review, 2026-07-23): result values
-# were previously only recorded as prose in code comments / CONTEXT.md, which goes stale silently
-# if the underlying data changes (as happened earlier this project). These files are the
-# ground truth for a given run; comments/docs should cite them, not replace them.
+# Persist this run's metrics and forecasts to disk — these files are the ground truth
+# for a given run.
 results_summary.to_csv('results_summary.csv')
 
 _test_origin_dates = origin_time.iloc[T:T + n_test_hours].reset_index(drop=True)
 _test_target_dates = target_time.iloc[T:T + n_test_hours].reset_index(drop=True)
 forecasts_out = pd.DataFrame({
-    'origin_time': _test_origin_dates,   # when the forecast was issued (review #7)
+    'origin_time': _test_origin_dates,   # when the forecast was issued
     'target_time': _test_target_dates,   # the hour actually being predicted, = origin + 24h
     'actual':   _test_actual,
     'dnn':      _pred_dnn,
