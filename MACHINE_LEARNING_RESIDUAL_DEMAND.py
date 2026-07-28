@@ -327,7 +327,7 @@ df.reset_index(inplace=True)
 # so that the DNN recognises that hour 23 is adjacent to hour 0, and December is adjacent to January.
 # - **Holiday indicator** (`is_holiday`): binary flag for the 14 official Panamanian public holidays in 2025.
 # - **Interaction feature** (`hour_weekday = hour × is_weekday`): captures the midday peak that only
-# occurs on working days — v18 finding, small but consistent gain for tree models.
+# occurs on working days — small but consistent gain for tree models.
 # ────────────────────────────────────────────────────────────────────────────
 
 df['month'] = df['local_time'].dt.month
@@ -478,7 +478,7 @@ cols_order = [
     # Current meteorology (7)
     'irradiance_direct', 'irradiance_diffuse', 'temperature',
     'solar_mw', 'wind_speed', 'eolica_mw', 'hidro_mw',
-    # NWP horizon covariates at t+24 (4) ← most impactful group (v22)
+    # NWP horizon covariates at t+24 (4) ← most impactful group
     'irradiance_direct_h24', 'irradiance_diffuse_h24',
     'temperature_h24', 'wind_speed_h24',
     # Calendar features (11)
@@ -628,7 +628,7 @@ from sklearn.metrics import (mean_absolute_percentage_error, mean_absolute_error
 
 def compute_metrics(actual, predicted):
     """
-    Compute four error metrics: MAPE, WAPE, sMAPE, R² — v24 metric suite.
+    Compute four error metrics: MAPE, WAPE, sMAPE, R².
 
     MAPE  (Shringi et al. 2025): standard, but sensitive when residual demand approaches zero.
     WAPE  (Feng et al. 2026)   : uses the sum of actuals as denominator — robust near zero.
