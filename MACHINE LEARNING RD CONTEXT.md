@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.19 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble. **ORACLE BASELINE = 8.18% MAPE Ensemble, 59 rolling days (§12.7).** **REALISTIC (non-oracle weather) counterpart = 8.81% MAPE Linear — now the best model once perfect-foresight weather is removed (§12.8)**; perfect weather was worth ≈0.3-0.8pp MAPE depending on model. Two new baselines: Linear regression, Weekly-Naive. Weighted-ensemble code removed per user request (§9.2, §8 row 18). External review logged (§12); done: easy/trivial batch (§12.5), correctness batch (§12.6), labeling+lag+baselines batch (§12.7), realistic-weather experiment (§12.8), holdout sign-off + print sweep + comment tightening (§12.9). Still open: #13 (token env var), #17 (experimental model). Backup/checkpoint protocol in §13.
+**Version:** v26.20 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble. **ORACLE BASELINE = 8.18% MAPE Ensemble, 59 rolling days (§12.7).** **REALISTIC (non-oracle weather) counterpart = 8.81% MAPE Linear — now the best model once perfect-foresight weather is removed (§12.8)**; perfect weather was worth ≈0.3-0.8pp MAPE depending on model. Two new baselines: Linear regression, Weekly-Naive. Weighted-ensemble code removed per user request (§9.2, §8 row 18). External review logged (§12); done: easy/trivial batch (§12.5), correctness batch (§12.6), labeling+lag+baselines batch (§12.7), realistic-weather experiment (§12.8), holdout sign-off + print sweep + comment tightening (§12.9). Still open: #13 (token env var, deferred by user's choice). **#17 (experimental/weaker model) deliberately deferred (2026-07-24, user's choice) — not a gap, a decision.** Backup/checkpoint protocol in §13.
 
 > **Standing rule:** the Renewables.ninja download code (geocoding prompt, token, API calls) is
 > owned by the user — **do not modify it** without explicit instruction. See §8 row 10.
@@ -683,7 +683,7 @@ alignment first, then one clean rerun)
 | 1 — correctness, must fix before any number is trustworthy | #3 solar calibration leak (train-window-only, frozen forward, new per-window rebuild function needed); #11 confirm hour convention (**blocked on ETESA source**); ~~#6 decide `hidro_mw` in/out + fix comment~~; #7/#8 add `origin_time`/`target_time`, fix forecast plot indexing | #6 done (2026-07-23, see §12.5); rest not started |
 | 2 — same tier, cheap but load-bearing | #9 lag semantics decision (144 vs 168) + training-only correlation recompute; #12 missing-hour/duplicate-timestamp checks; ~~#10 document the Feb 29 row~~ | #10 done (2026-07-23, see §12.5); rest not started |
 | 3 — do together with the rerun | #19 add linear + weekly-naive baselines, ~~soften model-selection message~~; #4 second experiment with realistic (non-oracle) forecast weather, clearly label the oracle run as an upper bound | #19 message-softening half done (2026-07-23); baselines + #4 not started |
-| 4 — hygiene, no accuracy effect, safe anytime | #13 rotate + env-var the token (**skipped for now, user's choice** — user must rotate); ~~#14 pin `requirements.txt`, drop inline pip install, save raw API response~~; ~~#20 remove global warnings filter~~ (print-volume trim still open); ~~#16 write metrics/forecasts to files instead of code comments~~; #17 add the actual experimental/weaker model file; ~~#1 verify Parquet/Excel headings~~ (already correct); ~~#2 review updated README~~ | #1, #2, #14, #16, #20 (partial) done (2026-07-23, see §12.5); #13, #17 not started |
+| 4 — hygiene, no accuracy effect, safe anytime | #13 rotate + env-var the token (**skipped for now, user's choice** — user must rotate); ~~#14 pin `requirements.txt`, drop inline pip install, save raw API response~~; ~~#20 remove global warnings filter~~; ~~#16 write metrics/forecasts to files instead of code comments~~; #17 add the actual experimental/weaker model file (**deferred, user's choice, 2026-07-24**); ~~#1 verify Parquet/Excel headings~~ (already correct); ~~#2 review updated README~~ | #1, #2, #14, #16, #20 done; #13, #17 deliberately deferred, not started |
 
 ### 12.4 Open questions blocking Tier 1 (need answers before implementation, not resolvable from
 the data or code alone)
@@ -691,8 +691,9 @@ the data or code alone)
    fixed, see §12.6.
 2. ~~**What "clean holdout" concretely means**~~ **RESOLVED / SIGNED OFF** (2026-07-24) — see the
    holdout discipline statement below.
-3. **Whether an LSTM/alternative model was ever actually run** outside this repo (recoverable) or
-   whether #17 is new work to scope from scratch. **Still open.**
+3. ~~**Whether an LSTM/alternative model was ever actually run**~~ **DEFERRED** (2026-07-24,
+   user's choice) — #17 (experimental/weaker model file) is set aside for now, not scoped as
+   active work. Revisit only if/when the user asks.
 4. ~~**Lag semantics intent**~~ **RESOLVED** (2026-07-23) — switched to target-relative
    (144/312), evidence-based, see §12.7.
 
