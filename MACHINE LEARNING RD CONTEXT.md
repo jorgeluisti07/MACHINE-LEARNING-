@@ -963,6 +963,90 @@ Synced into `.py` and `.ipynb`, `py_compile` + per-cell `ast.parse` clean on bot
 rerun performed for this batch — pure comment/print changes with no logic touched, and no variable
 removed that other code depends on, so `py_compile`/`ast.parse` are sufficient verification here.
 
+### 12.10 Diagnostic chart review — error concentration and the solar-calibration ceiling (2026-07-29)
+
+EDA on the oracle run's `forecasts.csv` (Ensemble column). No code or feature changes were made;
+this is pure analysis of the already-shipped results, kept separate from the Tier-1/Tier-2 fixes
+above.
+
+**Top-10-worst-days.** 8 of the 10 highest single-day-MAPE days fall on or adjacent to the 2025
+Panama holiday list (§ see the holiday dates cited near the top-10 chart's origin). Quantifying the
+ceiling on a holiday-only fix: the top-10 days are 10/59 ≈ 17% of test days but carry roughly 35%
+of total absolute error mass, so a perfect fix on just those days would move overall MAPE by a few
+tenths of a percentage point — not a drastic change. This is expected: MAPE is a mean over ~1,400
+test hours, so no small subset of days can dominate it. Moving the *average* error requires levers
+that touch most/all hours (better general features, e.g. P4-style trend features), not tail-day
+patches (P1-style holiday flags).
+
+**Zoomed accurate-vs-inaccurate period comparison.** Beyond the top-10 list, a second tier of
+moderately-bad days appears around Christmas that a top-10 ranking alone doesn't surface. The
+common failure shape across bad days is trough-depth underestimation — the model overshoots the
+daily minimum (predicts a shallower dip than actually occurs) — not peak misses. This recurs at
+roughly 5 points across the whole 2-month test period, only some of which align with holidays;
+"deep-trough days are hard in general" is a better frame than "holidays are hard." Lag-anchored
+features (`residual_L144`, `residual_L312`) are anchored to typical recent patterns and have no
+structural way to warn of a sharp break from those patterns before it happens, which is consistent
+with under-predicting unusually deep troughs.
+
+**Day-of-week MAE.** Sunday is the worst day (~95 MW MAE), Saturday the best (~61 MW), despite the
+model already having full day-of-week information via `dow_sin`/`dow_cos`. Likely genuine (not a
+missing-feature gap), but every weekday bucket is only ~8-9 days in a 59-day test set, so a single
+outlier day can visibly distort one bar (e.g. Thursday) — read the day-of-week pattern as
+suggestive, not as strong evidence on its own.
+
+**Hour-of-day MAE (oracle run).** Error tightly tracks Panama's solar-generation window: lowest
+overnight, rising through the morning, peaking around hour 11-13 (~130-134 MW MAE), decaying
+through the afternoon/evening. Mechanistically this follows directly from
+`demanda_residual = demanda − solar − eolica`: any solar-estimation error propagates 1:1 into
+residual-demand error, and that error is largest in absolute MW exactly when solar output itself is
+largest (midday). Evening peak-demand hours (18-21) do **not** show elevated error despite plausibly
+higher absolute demand, which argues against generic demand-side volatility as the main driver and
+points at the solar component specifically.
+
+**Oracle-vs-realistic hour-of-day comparison (confirms the calibration-ceiling hypothesis).**
+Because the oracle run already uses perfect-foresight weather (`*_h24` = true future MERRA-2
+values), the midday error elevation seen above cannot be a "missing weather forecast" problem — it
+has to originate downstream of weather availability. The leading candidate is the leakage-safe solar
+calibration (`rebuild_calibration_features`), which fits a single per-hour-of-day multiplicative
+factor from training data and can't capture day-to-day cloud/panel-performance variation, combined
+with the fact noted above that MW-scale error naturally grows with the magnitude of solar output.
+
+To test this, the same hour-of-day MAE breakdown was computed for the **realistic** run
+(`forecasts_realistic.csv`, no `*_h24` weather features at all — see §12.8) and compared to the
+oracle run, using the persisted forecasts from each run's last execution (no rolling-loop rerun
+needed):
+
+| Hour | Oracle MAE (MW) | Realistic MAE (MW) | Realistic vs Oracle |
+|---|---|---|---|
+| 0-7 (night/pre-dawn) | 40-56 | 47-59 | +4-21% (small absolute MW) |
+| 8-13 (morning ramp / midday peak) | 79-135 | 85-141 | +3-11%, **smallest relative gap of the day at the 10-13 peak (+3-5%)** |
+| 14-16 (afternoon decay) | 119-126 | 135-143 | **+13-14%, largest relative gap of the day** |
+| 17-23 (evening/late) | 50-96 | 51-99 | +2-7% |
+
+Shape correlation between the two hourly-MAE curves: **r = 0.994** — essentially the same curve,
+shifted up. Overall Ensemble MAE: oracle 79.2 MW vs realistic 85.3 MW (+7.7%), consistent with the
+59-day summary metrics in §12.8.
+
+**Interpretation.** The near-identical shape (r = 0.994) supports the calibration-ceiling hypothesis
+over a pure weather-forecast-timing story: if the midday error were mainly about *not knowing*
+tomorrow's weather, the realistic run's error would be expected to look structurally different at
+midday (largest relative penalty exactly where sun is strongest and forecast uncertainty compounds
+fastest), not just uniformly higher everywhere. Instead, the *smallest* relative penalty from
+dropping perfect-foresight weather is right at the 10-13 midday peak — i.e., knowing tomorrow's
+weather perfectly barely helps at the hour where solar output (and thus error) is largest, which is
+exactly what you'd expect if a coarse, training-only, per-hour-average calibration factor is already
+the binding constraint there, not the weather input itself. The largest relative penalty instead
+falls in the 14-16 afternoon-decay window, where knowing the future irradiance trajectory (rather
+than just an average-for-this-hour profile) genuinely matters more, e.g. distinguishing a clear
+afternoon from an early cloud-in cutting solar output short. So the two effects are both real but at
+different hours: the midday ceiling is calibration-shape driven, the afternoon gap is weather-
+foresight driven.
+
+This is diagnostic-only; no roadmap item is being opened from it yet. If a calibration refinement
+(e.g. per-(hour, season) or per-(hour, cloud-proxy) factors instead of per-hour-only) is later
+proposed, it must be validated on the validation split only per the §12.4/§12.9 holdout discipline,
+with the test period touched once more at the very end.
+
 ---
 
 ## 13. Session Infrastructure — Backup/Checkpoint Protocol & Stop-Hook Recovery
