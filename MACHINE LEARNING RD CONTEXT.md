@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.20 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble. **ORACLE BASELINE = 8.18% MAPE Ensemble, 59 rolling days (§12.7).** **REALISTIC (non-oracle weather) counterpart = 8.81% MAPE Linear — now the best model once perfect-foresight weather is removed (§12.8)**; perfect weather was worth ≈0.3-0.8pp MAPE depending on model. Two new baselines: Linear regression, Weekly-Naive. Weighted-ensemble code removed per user request (§9.2, §8 row 18). External review logged (§12); done: easy/trivial batch (§12.5), correctness batch (§12.6), labeling+lag+baselines batch (§12.7), realistic-weather experiment (§12.8), holdout sign-off + print sweep + comment tightening (§12.9). Still open: #13 (token env var, deferred by user's choice). **#17 (experimental/weaker model) deliberately deferred (2026-07-24, user's choice) — not a gap, a decision.** Backup/checkpoint protocol in §13.
+**Version:** v26.21 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble. **ORACLE BASELINE = 8.46% MAPE Ensemble, 59 rolling days (§12.11, supersedes §12.7's 8.18%).** **REALISTIC (non-oracle weather) counterpart = 9.00% MAPE Ensemble; XGBoost (8.89%) and Linear (8.92%) are a near-tie within run-to-run noise for best individual model (§12.11, supersedes §12.8's "Linear is best")**; perfect weather was worth ≈0.3-0.5pp MAPE depending on model. Two new baselines: Linear regression, Weekly-Naive. Weighted-ensemble code removed per user request (§9.2, §8 row 18). External review logged (§12); done: easy/trivial batch (§12.5), correctness batch (§12.6), labeling+lag+baselines batch (§12.7), realistic-weather experiment (§12.8), holdout sign-off + print sweep + comment tightening (§12.9), diagnostic chart review (§12.10), weather hour-convention fix (§12.11, closes the last open item from the external review). Still open: #13 (token env var, deferred by user's choice). **#17 (experimental/weaker model) deliberately deferred (2026-07-24, user's choice) — not a gap, a decision.** Backup/checkpoint protocol in §13.
 
 > **Standing rule:** the Renewables.ninja download code (geocoding prompt, token, API calls) is
 > owned by the user — **do not modify it** without explicit instruction. See §8 row 10.
@@ -1046,6 +1046,85 @@ This is diagnostic-only; no roadmap item is being opened from it yet. If a calib
 (e.g. per-(hour, season) or per-(hour, cloud-proxy) factors instead of per-hour-only) is later
 proposed, it must be validated on the validation split only per the §12.4/§12.9 holdout discipline,
 with the test period touched once more at the very end.
+
+### 12.11 Weather hour-convention fix — the last open item from the external review (2026-07-30)
+
+An adversarial re-check of every point in §12.2, item by item against the current code, found one
+item marked "resolved" that was only half-resolved: #11 (hour-convention alignment). The
+demand-vs-generation half was fixed in §12.6, but the code comment left there admitted the
+weather side was never checked:
+`# Note: Renewables.ninja weather timestamps may use hour-BEGINNING instead — a separate
+alignment question, left unchanged here.` This section closes that gap.
+
+**Confirmed as a real bug, not just an open question.** Two independent checks, both pointing the
+same direction:
+1. **Documentation.** Renewables.ninja's API docs state hourly timestamps are labeled by the
+   **start** of the interval (hour-beginning). ETESA demand/generation are hour-ending (§12.6).
+2. **Empirical, on this project's own downloaded data.** Under the previous (unshifted) join, the
+   diurnal solar profile shows a clean, consistent 1-hour offset across three independent
+   landmarks — ramp start (ninja hour 6 vs real hour 7), peak (ninja 11 vs real 12), ramp end
+   (ninja 17 vs real 18). Full-series cross-correlation between modeled and real solar output
+   also peaks at a +1h shift (r=0.878 at 0h vs r=0.878 at +1h with lower MAE; irradiance-vs-real
+   correlation: 0.641 at 0h vs 0.657 at +1h) — same direction, smaller margin (day-to-day weather
+   variability dominates full-series correlation, diluting the effect; the diurnal-landmark check
+   is the more diagnostic one for a pure labeling-convention question).
+
+**Consequence:** every weather feature (`irradiance_direct/diffuse`, `temperature`, `wind_speed`,
+and their `_h24` versions) was silently paired with the wrong physical hour of demand/generation —
+off by exactly one hour, same direction and mechanism as the already-fixed demand bug. This also
+likely biased the solar calibration factor (`rebuild_calibration_features`), which is fit from
+`real_solar / ninja_solar` at these same misaligned timestamps.
+
+**Fix:** shift the weather data's index forward by 1 hour right after `df_combined` is built (before
+the `to_csv` export and before the join with real generation), in both
+`MACHINE_LEARNING_RESIDUAL_DEMAND.py` and `experiments/realistic_weather_ablation.py` (duplicates
+the same data-loading logic). This relabels every weather timestamp to hour-ending, matching the
+rest of the pipeline, so the join now pairs weather and generation values for the same physical
+hour. The comment in the demand-loading section that flagged this as unresolved was updated to say
+it's now fixed, pointing at the shift.
+
+**Honest before/after (same 59-day Nov 2 – Dec 31 test window, full rolling rerun, both scenarios).
+Numbers went up — same pattern as every previous leakage/alignment fix this session: correcting a
+real bug removes an inflation, it doesn't add noise.**
+
+| Model | Oracle MAPE% before → after | Oracle MAE MW before → after | Realistic MAPE% before → after | Realistic MAE MW before → after |
+|---|---|---|---|---|
+| DNN | 8.41 → 8.81 | 81.6 → 85.1 | 9.20 → 9.48 | 88.7 → 90.4 |
+| XGBoost | 8.34 → 8.53 | 81.0 → 82.0 | 8.93 → 8.89 | 85.5 → 84.9 |
+| **Ensemble** | 8.18 → **8.46** | 79.2 → 81.3 | 8.91 → **9.00** | 85.3 → 85.7 |
+| Linear | 8.47 → 8.64 | 82.7 → 83.8 | 8.81 → 8.92 | 85.6 → 86.2 |
+| Naive | 11.59 (unchanged) | 114.7 (unchanged) | 11.59 (unchanged) | 114.7 (unchanged) |
+| Weekly-Naive | 12.26 (unchanged) | 121.9 (unchanged) | 12.26 (unchanged) | 121.9 (unchanged) |
+
+Naive and Weekly-Naive are exactly unchanged in both scenarios — sanity check confirming the fix
+touched only weather-derived features, nothing else. XGBoost is the one model that improved
+slightly in the realistic scenario (8.93→8.89%); every other cell moved in the expected
+worse-after-honest-fix direction. The flat Ensemble is still the best model in the **oracle**
+scenario. In the **realistic** scenario, XGBoost (8.89%) and Linear (8.92%) are now close enough
+(0.03 pp) to be within this project's documented run-to-run noise band (README.md: TensorFlow
+op-level nondeterminism moves DNN metrics by ≈±0.05 pp between runs) — **no longer a clean
+"Linear is now best" story** as reported in §12.8; call it a near-tie between XGBoost and Linear
+pending a repeat run, not a settled ranking.
+
+**This 8.46% (oracle) / 9.00% (realistic) Ensemble MAPE is the new honest baseline, superseding
+the 8.18%/8.91% figures in §12.7/§12.8/§12.10.**
+
+**Robustness check: does the hour-of-day / calibration-ceiling finding from §12.10 survive this
+fix?** Recomputed the oracle-vs-realistic hourly MAE comparison on the corrected forecasts:
+shape correlation is **r=0.998** (was r=0.994 pre-fix) — if anything a tighter match. The relative
+gap is still smallest at the 10-13 midday peak (5-6%) and largest in the 14-16 afternoon window
+(7.5-11.5%). **Conclusion unchanged:** the midday error ceiling is calibration-shape driven, not a
+weather-timing artifact, and that conclusion was not an artifact of the now-fixed misalignment bug
+either — it holds on both the leaky and the corrected data.
+
+**Verification:** `py_compile` clean on both `.py` files; per-cell `ast.parse` clean on the
+notebook (67 cells, 0 errors); full rolling rerun executed for both scenarios in the scratch
+environment (not just a syntax check) to get the honest before/after numbers above.
+
+**Revert:** the fix is a single `df_combined.index = df_combined.index + pd.Timedelta(hours=1)`
+line (plus the corresponding comment update) in each of the two Python files — removing that one
+line and reverting the comment restores the pre-fix (misaligned) behavior. Not recommended; the
+misalignment is a confirmed bug, not a modeling choice.
 
 ---
 
