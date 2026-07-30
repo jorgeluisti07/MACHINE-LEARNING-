@@ -24,7 +24,7 @@ i.e. the portion of demand that hydro + thermal must supply once variable renewa
 | `DEM2025.csv` | ETESA hourly demand (input) |
 | `solar_eolica_hidro_horario_2025.csv` | Real ETESA generation (input) |
 | `renewables_ninja_2025.csv` | Export of the downloaded API weather data, written by each run (traceability of the exact inputs used) |
-| `experiments/realistic_weather_ablation.py` | Second experiment: same pipeline, without the perfect-foresight `*_h24` weather features — see `MACHINE LEARNING RD CONTEXT.md` §12.8 for the oracle-vs-realistic comparison |
+| `experiments/realistic_weather_ablation.py` | Second experiment: same pipeline, without the perfect-foresight `*_h24` weather features — see `MACHINE LEARNING RD CONTEXT.md` §12.8 for the oracle-vs-realistic methodology, §12.11 for the current numbers |
 
 ## How to Run
 
@@ -79,6 +79,9 @@ is the intended entry point.
 - `results_summary.csv` and `forecasts.csv`, written at the end of the run — the results table and
   per-hour test-period forecasts (actual, DNN, XGBoost, Ensemble, Naive) persisted to disk, so
   reported numbers can always be traced back to an actual run's output rather than a comment.
+- Two diagnostic plots for the Ensemble: the full test-period actual-vs-forecast line chart, and
+  mean absolute error by hour of day (see `MACHINE LEARNING RD CONTEXT.md` §12.10/§12.11 for what
+  the hour-of-day error pattern indicates).
 
 ## Assumptions & limitations
 
