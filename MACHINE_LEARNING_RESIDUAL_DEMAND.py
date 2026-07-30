@@ -179,6 +179,16 @@ df_combined = pd.concat([
 # Concatenate the solar columns and the wind columns side by side (axis=1).
 # dropna() removes any hour where at least one API value is missing.
 
+df_combined.index = df_combined.index + pd.Timedelta(hours=1)
+# Renewables.ninja labels each hourly value by the START of the interval (hour-beginning),
+# while the ETESA demand/generation files label by the END of the interval (hour-ending,
+# see the H_k -> k:00 fix below). Confirmed empirically: under the raw (unshifted) join, the
+# modeled solar ramp/peak/decay each land exactly 1 hour earlier than the real ETESA solar
+# profile (ramp start hour 6 vs 7, peak 11 vs 12, ramp end 17 vs 18), and shifting the weather
+# index forward by 1h both raises correlation against real solar and lowers MAE. Shifting here
+# relabels every weather timestamp to hour-ending, matching the rest of the pipeline, so the
+# join below pairs weather and generation values for the same physical hour.
+
 df_combined.to_csv('renewables_ninja_2025.csv')
 # Export a copy of the downloaded API data (all six meteorological columns) so the
 # exact weather inputs behind a run are preserved on disk and results can be traced
@@ -225,8 +235,8 @@ demanda_long['hora_num'] = (
 )
 # HOUR-ENDING convention: the generation file runs 2025-01-01 01:00 → 2026-01-01 00:00 =
 # exactly 8760 rows (365×24) — only possible if hours are labeled by when they END (00:00–01:00
-# stamped 01:00). So H_k maps to k:00. Note: Renewables.ninja weather timestamps may use
-# hour-BEGINNING instead — a separate alignment question, left unchanged here.
+# stamped 01:00). So H_k maps to k:00. Renewables.ninja weather timestamps use hour-BEGINNING
+# instead — shifted to match this convention where df_combined is built, above.
 
 demanda_long['timestamp'] = (
     demanda_long['fecha_dt'] + pd.to_timedelta(demanda_long['hora_num'], unit='h')
@@ -1602,3 +1612,38 @@ forecasts_out = pd.DataFrame({
 }).set_index('target_time')
 forecasts_out.to_csv('forecasts.csv')
 print(f"\nSaved 'results_summary.csv' and 'forecasts.csv' ({len(forecasts_out)} rows) for this run.")
+
+# ────────────────────────────────────────────────────────────────────────────
+# Full test period — Actual vs Ensemble
+# ────────────────────────────────────────────────────────────────────────────
+
+plt.figure(figsize=(16, 5))
+plt.plot(_test_target_dates, _test_actual, color='steelblue', linewidth=0.8, label='Actual Residual Demand')
+plt.plot(_test_target_dates, _pred_ens, color='crimson', linewidth=0.8, linestyle='--', label='Ensemble Forecast')
+plt.title(f'Full Test Period Forecast (Ensemble Model): {len(_test_target_dates)} Hours')
+plt.xlabel('Target Date')
+plt.ylabel('Residual Demand (MW)')
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# ────────────────────────────────────────────────────────────────────────────
+# Ensemble MAE by hour of day
+# ────────────────────────────────────────────────────────────────────────────
+
+_hourly_mae = (
+    pd.DataFrame({'hour': _test_target_dates.dt.hour, 'abs_err': np.abs(_test_actual - _pred_ens)})
+    .groupby('hour')['abs_err'].mean()
+    .reindex(range(24))
+)
+
+plt.figure(figsize=(12, 5))
+plt.bar(_hourly_mae.index, _hourly_mae.values, color=plt.cm.magma(np.linspace(0.05, 0.95, 24)))
+plt.title('Average Forecast Error (MAE) by Hour of Day')
+plt.xlabel('Hour (0-23)')
+plt.ylabel('Mean Absolute Error (MW)')
+plt.xticks(range(24))
+plt.grid(axis='y', alpha=0.3, linestyle='--')
+plt.tight_layout()
+plt.show()

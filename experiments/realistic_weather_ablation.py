@@ -118,6 +118,11 @@ df_combined = pd.concat([
         columns={'electricity': 'wind_mw'})
 ], axis=1).dropna()
 
+df_combined.index = df_combined.index + pd.Timedelta(hours=1)
+# Renewables.ninja labels each hourly value by the start of the interval (hour-beginning),
+# while ETESA demand/generation label by the end (hour-ending). Shifted here to match, same
+# fix and evidence as the main script (see MACHINE_LEARNING_RESIDUAL_DEMAND.py).
+
 df_combined.to_csv('renewables_ninja_2025.csv')
 
 # ── Load ETESA real-generation data from CSV ─────────────────────────────────────
