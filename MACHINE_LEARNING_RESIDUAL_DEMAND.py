@@ -6,23 +6,16 @@ Models: Deep Neural Network (DNN) + XGBoost | Horizon h=24 | Lagged Approach
 Converted from MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb
 """
 
-
 import warnings
 
-# ────────────────────────────────────────────────────────────────────────────
 # Horizon **h = 24** (day-ahead, hourly resolution).
 # Two models: **Deep Neural Network (DNN)** and **XGBoost**.
 # Feature approach: **Lagged values** (`use_polynomials = False`),
-# ────────────────────────────────────────────────────────────────────────────
 
-# ────────────────────────────────────────────────────────────────────────────
 # Data Preprocessing
 # Data Preprocessing: clean / organise the input data into the format required by the models. <br>
-# ────────────────────────────────────────────────────────────────────────────
 
-# ────────────────────────────────────────────────────────────────────────────
 # setting the constants
-# ────────────────────────────────────────────────────────────────────────────
 
 use_polynomials = False
 # False means we use the Lagged Values approach
@@ -49,18 +42,14 @@ MAX_LAG = LAG_2
 # residual_L48's 48, and LAG_1*2=48), so MAX_LAG=LAG_2 remains a correct, sufficient upper bound.
 # The first MAX_LAG rows are dropped after feature construction to avoid NaN values.
 
-# ────────────────────────────────────────────────────────────────────────────
 # LAG_2 and LAG_3 were chosen over LAG_1 (r ≈ 0 with the target) by Pearson correlation analysis.
 # LAG_1 (24 h) was dropped because it is nearly collinear with the current value of `demanda_residual`,
 # adding no information. The 48-hour lag (training-only r = 0.575) is included as `residual_L48`
 # in the feature list below — kept input-relative since target_time is always input+24h anyway,
 # so a "48h before input" and "72h before target" framing are just two names for the same feature;
 # there is no clean-week alignment question for it the way there is for the 1- and 2-week lags.
-# ────────────────────────────────────────────────────────────────────────────
 
-# ────────────────────────────────────────────────────────────────────────────
 # data download
-# ────────────────────────────────────────────────────────────────────────────
 
 import requests, json as _json
 import pandas as pd
@@ -180,14 +169,9 @@ df_combined = pd.concat([
 # dropna() removes any hour where at least one API value is missing.
 
 df_combined.index = df_combined.index + pd.Timedelta(hours=1)
-# Renewables.ninja labels each hourly value by the START of the interval (hour-beginning),
-# while the ETESA demand/generation files label by the END of the interval (hour-ending,
-# see the H_k -> k:00 fix below). Confirmed empirically: under the raw (unshifted) join, the
-# modeled solar ramp/peak/decay each land exactly 1 hour earlier than the real ETESA solar
-# profile (ramp start hour 6 vs 7, peak 11 vs 12, ramp end 17 vs 18), and shifting the weather
-# index forward by 1h both raises correlation against real solar and lowers MAE. Shifting here
-# relabels every weather timestamp to hour-ending, matching the rest of the pipeline, so the
-# join below pairs weather and generation values for the same physical hour.
+# Renewables.ninja labels by interval START (hour-beginning); ETESA files label by interval
+# END (hour-ending, see the H_k -> k:00 fix below). Shifted to match, confirmed empirically
+# (solar ramp/peak/decay land exactly 1h earlier under the old, unshifted join).
 
 df_combined.to_csv('renewables_ninja_2025.csv')
 # Export a copy of the downloaded API data (all six meteorological columns) so the
@@ -223,9 +207,6 @@ demanda_long['fecha_dt']  = pd.to_datetime(demanda_long['fecha'], errors='coerce
 _bad_dates = sorted(demanda_long.loc[demanda_long['fecha_dt'].isna(), 'fecha'].unique())
 if _bad_dates:
     print(f'WARNING: dropping {len(_bad_dates)} unparseable date(s) from DEM2025.csv: {_bad_dates}')
-    # Known case: the source export contains 02/29/2025, which does not exist (2025 is not a
-    # leap year). Treated as a source data error and dropped here, surfaced explicitly
-    # rather than silently discarded.
 
 demanda_long  = demanda_long.dropna(subset=['fecha_dt'])
 # Parse dates; drop any rows where the date cannot be converted.
@@ -260,7 +241,6 @@ df_combined = df_combined[df_combined.index >= '2025-01-01 01:00:00']
 df = df_combined
 print('Columns:', df.columns.tolist())
 
-# ────────────────────────────────────────────────────────────────────────────
 # Index integrity: every lag/shift feature below assumes "N rows back = N hours back". That
 # only holds if the hourly index is complete (no gaps) and unique (no duplicate timestamps).
 _idx = pd.DatetimeIndex(df.index)
@@ -275,14 +255,12 @@ assert _missing.empty, (
 print(f'Index OK: {len(_idx):,} unique, gap-free hourly rows '
       f'({_idx.min()} → {_idx.max()}).')
 
-# ────────────────────────────────────────────────────────────────────────────
 # calibration — LEAKAGE-SAFE, re-fit per rolling window
 # Calibrating irradiance against real solar at the SAME rows later used to build the h24
 # horizon features would leak the target (real solar at t+24) into the inputs. Fix: no
 # calibration here — keep raw ninja values; the actual factor is fit training-only, per
 # rolling window, in rebuild_calibration_features() below (see its docstring for the full
 # derivation). Same discipline as the hydro profile rebuild.
-# ────────────────────────────────────────────────────────────────────────────
 
 # Preserve the raw (uncalibrated) ninja signals the per-window calibration needs downstream.
 df['irr_direct_ninja']  = df['irradiance_direct']
@@ -313,23 +291,18 @@ print(f'Base: {df.shape[1]} cols, {df.shape[0]} records.')
 print(f'hidro_mw — mean={df.hidro_mw.mean():.0f} MW  min={df.hidro_mw.min():.0f}  max={df.hidro_mw.max():.0f}')
 # Print a quick sanity check: typical hydro range for Panama is 600–1400 MW.
 
-# ────────────────────────────────────────────────────────────────────────────
 # check for missing values
-# ────────────────────────────────────────────────────────────────────────────
 
 print(df.isnull().sum())
 # Count the number of NaN values in each column.
 # A non-zero count means we have missing hours that must be handled before modelling.
 
-# ────────────────────────────────────────────────────────────────────────────
 # correct datatypes
-# ────────────────────────────────────────────────────────────────────────────
 
 df.reset_index(inplace=True)
 # Move the datetime index back into a regular column called 'local_time'.
 # This allows us to use .dt accessor methods to extract hour, month, day-of-week.
 
-# ────────────────────────────────────────────────────────────────────────────
 # feature engineering — calendar and cyclic features
 # The ETESA load follows strong intra-day and intra-week patterns. We encode these using:
 # - **Integer features** (`month`, `hour`, `is_weekday`) for tree models.
@@ -338,7 +311,6 @@ df.reset_index(inplace=True)
 # - **Holiday indicator** (`is_holiday`): binary flag for the 14 official Panamanian public holidays in 2025.
 # - **Interaction feature** (`hour_weekday = hour × is_weekday`): captures the midday peak that only
 # occurs on working days — small but consistent gain for tree models.
-# ────────────────────────────────────────────────────────────────────────────
 
 df['month'] = df['local_time'].dt.month
 # Extract the calendar month (1–12) as an integer feature.
@@ -368,7 +340,6 @@ df['is_holiday'] = df['local_time'].dt.date.map(lambda d: int(d in _holiday_set)
 # Note: is_holiday is a SPARSE binary feature (only 14 days per year = ~1 of the data).
 # It is suitable for flat feature spaces (XGBoost handles sparse splits well),
 
-
 # ── Day-of-week cyclic encoding ───────────────────────────────────────────────────
 df['dow_sin'] = np.sin(2 * np.pi * df['local_time'].dt.dayofweek / 7)
 df['dow_cos'] = np.cos(2 * np.pi * df['local_time'].dt.dayofweek / 7)
@@ -382,7 +353,6 @@ df = df.drop(columns=['local_time'])
 
 print(f'Holidays 2025: {len(_panama_holidays_2025)} days → {df.is_holiday.sum()} hours marked')
 
-# ────────────────────────────────────────────────────────────────────────────
 # target variable and feature construction
 # The **residual demand** is defined as:
 # > `demanda_residual = demanda_mw − solar_mw − eolica_mw`
@@ -393,7 +363,6 @@ print(f'Holidays 2025: {len(_panama_holidays_2025)} days → {df.is_holiday.sum(
 # The **lag features** are the pre-computed shifted values of `demanda_residual`.
 # The NWP horizon features are the meteorological values shifted 24 hours forward (future NWP at the target time).
 # The hydro dispatch features capture the operational state of the hydroelectric fleet.
-# ────────────────────────────────────────────────────────────────────────────
 
 # Target: residual demand
 df['demanda_residual'] = df['demanda_mw'] - df['solar_mw'] - df['eolica_mw']
@@ -434,7 +403,6 @@ df['residual_L48']  = df['demanda_residual'].shift(48)
 # weather forecast and are an optimistic upper bound. A real day-ahead deployment would
 # feed operational NWP (e.g. GFS/ECMWF) instead, whose forecast error would raise the
 # reported MAPE/WAPE. Treat the h24 weather block as a perfect-foresight proxy.
-# ──────────────────────────────────────────────────────────────────────────────
 df['irradiance_direct_h24']  = df['irradiance_direct'].shift(-HORIZON)
 df['irradiance_diffuse_h24'] = df['irradiance_diffuse'].shift(-HORIZON)
 df['temperature_h24']        = df['temperature'].shift(-HORIZON)
@@ -526,15 +494,11 @@ print(f'Datetime: {datetime_index.iloc[0]} → {datetime_index.iloc[-1]}')
 print(f'Features: {len(df.columns)-1} flat + 1 target = {len(df.columns)} columns')
 print(df.describe().round(2))
 
-# ────────────────────────────────────────────────────────────────────────────
 # Exploratory Data Analysis
 # EDA: inspect the data through plots, autocorrelation, and correlation analysis.
 # This section plot the data → check stationarity → correlation matrix.
-# ────────────────────────────────────────────────────────────────────────────
 
-# ────────────────────────────────────────────────────────────────────────────
 # plot the data
-# ────────────────────────────────────────────────────────────────────────────
 
 df[cols_order].plot(subplots=True, figsize=(14, 42), layout=(16, 2))
 # Plot each of the 31 model columns (cols_order) in its own sub-panel. df also carries the
@@ -543,14 +507,12 @@ df[cols_order].plot(subplots=True, figsize=(14, 42), layout=(16, 2))
 plt.tight_layout()
 plt.show()
 
-# ────────────────────────────────────────────────────────────────────────────
 # autocorrelation analysis and target scatter
 # The ACF reveals the dominant periodic structure: peaks at lags 24 (daily), 168 (weekly),
 # and 336 (biweekly). These directly motivate the choice of lag features.
 # The scatter plot confirms that the current residual demand is a useful but imperfect predictor
 # of the 24-hour-ahead target (r ≈ 0.69 in the actual run), justifying the addition of lag and
 # NWP features to explain the remaining ~50 % of variance.
-# ────────────────────────────────────────────────────────────────────────────
 
 from statsmodels.graphics.tsaplots import plot_acf
 from scipy.stats.stats import pearsonr
@@ -582,12 +544,10 @@ axes[1].set_ylabel('target h=24')
 plt.tight_layout()
 plt.show()
 
-# ────────────────────────────────────────────────────────────────────────────
 # correlation matrix
 # If some time series are non-stationary, the Pearson correlation matrix can be misleading
 # (spurious correlations). We use the KPSS test to identify non-stationary columns.
 # A KPSS p-value ≤ 1 % means the series is NOT stationary (null hypothesis = stationarity is rejected).
-# ────────────────────────────────────────────────────────────────────────────
 
 from statsmodels.tsa.stattools import kpss
 
@@ -623,15 +583,9 @@ plt.tight_layout()
 plt.show()
 # Dark red = strong positive correlation;
 
-# ────────────────────────────────────────────────────────────────────────────
-# Data Structures
-# - `predictions` — **dictionary of lists**: each list holds the training-set prediction DataFrame for every rolling iteration.
-# - `forecasts`   — **dictionary of DataFrames**: each DataFrame holds the test-set (day-ahead) forecasts, indexed by datetime.
-# - `errors`      — test-set MAPE per model (primary metric).
-# - `training_errors` — training-set MAPE per model.
-# - Additional DataFrames for WAPE, sMAPE, and R² (both test and training).
-# Two models only: **`deep_network`** (DNN) and **`xgboost`**.
-# ────────────────────────────────────────────────────────────────────────────
+# Data structures: `predictions` (dict of lists, training-set predictions per iteration),
+# `forecasts` (dict of DataFrames, test-set forecasts by datetime), `errors`/`training_errors`
+# (MAPE per model), plus WAPE/sMAPE/R² equivalents. Two models: `deep_network`, `xgboost`.
 
 from sklearn.metrics import (mean_absolute_percentage_error, mean_absolute_error,
                               mean_squared_error, r2_score)
@@ -640,10 +594,10 @@ def compute_metrics(actual, predicted):
     """
     Compute four error metrics: MAPE, WAPE, sMAPE, R².
 
-    MAPE  (Shringi et al. 2025): standard, but sensitive when residual demand approaches zero.
-    WAPE  (Feng et al. 2026)   : uses the sum of actuals as denominator — robust near zero.
-    sMAPE                      : symmetric, bounded 0–200 %, avoids MAPE asymmetry.
-    R²                         : fraction of variance explained; 1.0 = perfect forecast.
+    MAPE : standard, but sensitive when residual demand approaches zero.
+    WAPE : uses the sum of actuals as denominator — robust near zero.
+    sMAPE: symmetric, bounded 0–200 %, avoids MAPE asymmetry.
+    R²   : fraction of variance explained; 1.0 = perfect forecast.
 
     WAPE is consistently ~1 pp lower than MAPE here because during high-solar midday hours
     the residual demand shrinks toward zero, causing MAPE to spike in individual rows.
@@ -707,8 +661,6 @@ training_wape  = pd.DataFrame(index=[target_h24], columns=_cols)
 training_smape = pd.DataFrame(index=[target_h24], columns=_cols)
 training_r2    = pd.DataFrame(index=[target_h24], columns=_cols)
 
-
-# ────────────────────────────────────────────────────────────────────────────
 # Feature Extraction via Lagged Approach
 # this is done by the function `get_targets_features`, which returns `Y_train`, `X_train`, `X_test`
 # based on the **lagged values approach** (the parameter `use_polynomials = False`).
@@ -717,11 +669,9 @@ training_r2    = pd.DataFrame(index=[target_h24], columns=_cols)
 # The function's job here is simply to **slice** the DataFrame at cutoff `T` to produce training and test splits.
 # Below we import the `StandardScaler` which is required when `scale=True` (for the DNN).
 # For XGBoost we use `scale=False` because tree models are scale-invariant.
-# ────────────────────────────────────────────────────────────────────────────
 
 from sklearn.preprocessing import StandardScaler
 # Applied to X and Y for the DNN only. XGBoost is scale-invariant, so scale=False there.
-
 
 def rebuild_hidro_profile_features(df_in, T):
     """
@@ -751,7 +701,6 @@ def rebuild_hidro_profile_features(df_in, T):
     out['hidro_anomaly_L24'] = (out['hidro_mw'] - base).shift(LAG_1).fillna(0.0)
     return out
 
-
 def rebuild_calibration_features(df_in, T):
     """
     Re-fit the ninja→real solar calibration from TRAINING ROWS ONLY (rows < T) and apply it to
@@ -779,7 +728,6 @@ def rebuild_calibration_features(df_in, T):
     out['irradiance_direct_h24']  = (out['irr_direct_ninja_h24'].to_numpy()  * k)
     out['irradiance_diffuse_h24'] = (out['irr_diffuse_ninja_h24'].to_numpy() * k)
     return out
-
 
 def get_targets_features(df_in, T, scale=False):
     """
@@ -820,10 +768,8 @@ def get_targets_features(df_in, T, scale=False):
 
     return Y_train, X_train, X_test
 
-# ────────────────────────────────────────────────────────────────────────────
 # Below we verify the function by calling it once at the fixed training cutoff T = 7000.
 # We check that the shapes are correct and that the feature count equals exactly 30.
-# ────────────────────────────────────────────────────────────────────────────
 
 T_test = 7000
 Y_v, X_v, Xt_v = get_targets_features(df_in=df, T=T_test)
@@ -839,7 +785,6 @@ print(f'\nFeature list ({len(features_h24)} features):')
 print(features_h24)
 # Print the feature list so it is documented in the notebook output.
 
-# ────────────────────────────────────────────────────────────────────────────
 # Deep Neural Network (DNN) — Rolling h=24
 # > `Dense(256, relu) → Dense(256, relu) → Dense(128, relu) → Dense(1)`
 # - Trained with **Adam optimiser** (learning rate 0.001) and **MSE loss**.
@@ -849,9 +794,7 @@ print(features_h24)
 # - Seed 42 is fixed at each iteration so results are reproducible.
 # Adding the NWP horizon (*_h24) weather features noticeably improves DNN accuracy over
 # using calendar and lag features alone.
-# ────────────────────────────────────────────────────────────────────────────
 
-# ────────────────────────────────────────────────────────────────────────────
 # 5.1_ Using Rolling Predictions to train the model
 # The rolling loop below implements **walk-forward (expanding window) validation** — the standard
 # evaluation protocol for time-series forecasting
@@ -862,7 +805,6 @@ print(features_h24)
 # 4. The forecast is stored in `forecasts['deep_network']` and the training predictions in `predictions['deep_network']`.
 # 5. The model object and all intermediate DataFrames are saved in `globals()` under keys like
 # `model_dnn7000`, `X_train_dnn7000`
-# ────────────────────────────────────────────────────────────────────────────
 
 import os, random, tensorflow as tf
 from tensorflow.keras.models import Sequential
@@ -1007,10 +949,8 @@ for day_idx in tqdm(range(n_test_days), desc='DNN rolling h=24'):
     # Each key is the variable name plus T_day (an integer).
     # This allows inspection of any specific rolling-window model after the loop finishes.
 
-# ────────────────────────────────────────────────────────────────────────────
 # 5.2_ Plotting the test set predictions
 # Three panels: (1) full test period, (2) first 7 days zoom, (3) absolute error.
-# ────────────────────────────────────────────────────────────────────────────
 
 T_last       = T + (n_test_days - 1) * HORIZON
 # T_last is the training cutoff of the final rolling iteration.
@@ -1065,11 +1005,9 @@ axes[2].grid(alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-# ────────────────────────────────────────────────────────────────────────────
 # 5.3_ Plotting the training set predictions
 # We use `predictions['deep_network'][-1]` — the training predictions of the last rolling iteration
 # (the largest training window).
-# ────────────────────────────────────────────────────────────────────────────
 
 actual_train = df[target_h24].iloc[:T_last].values
 # Actual residual demand values over the training period.
@@ -1107,7 +1045,6 @@ axes[1].grid(alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-# ────────────────────────────────────────────────────────────────────────────
 # 5.4_ Training set MAPE
 # 5.5_ Test set MAPE
 # 5.6_ Overfitting analysis
@@ -1116,7 +1053,6 @@ plt.show()
 # All four metrics (MAPE, WAPE, sMAPE, R²) for both training and test are stored into the
 # error DataFrames. Then we check overfitting (test MAPE − train MAPE)
 # and run the model selection criteria: beat naive AND overfit < 10 pp.
-# ────────────────────────────────────────────────────────────────────────────
 
 # ── Store all metrics in the error DataFrames
 training_errors.loc[target_h24, 'deep_network'] = train_mape_dnn
@@ -1165,39 +1101,22 @@ else:
 # itself mean the model is ready for operational forecasting — see roadmap items on additional
 # baselines (weekly-naive, linear regression) and a realistic (non-oracle) weather experiment.
 
-# ────────────────────────────────────────────────────────────────────────────
 # XGBoost — Rolling h=24
 # Tree models are scale-invariant, so no StandardScaler is applied.
 # The validation set is the last 10 % of the training window, preserving temporal order.
-# **Best result : 7.35 % MAPE, WAPE=0.0621, R²=0.7539, overfit=2.75 pp.**
-# Feature importance confirms that `irradiance_direct_h24` is the 3rd most important feature (gain=0.080),
-# validating the NWP horizon hypothesis.
-# ────────────────────────────────────────────────────────────────────────────
 
-# ────────────────────────────────────────────────────────────────────────────
 # 6.1_ Using Rolling Predictions to train the model
-# ────────────────────────────────────────────────────────────────────────────
 
 from xgboost import XGBRegressor
 # XGBRegressor: the scikit-learn compatible XGBoost regression interface.
 
-# ────────────────────────────────────────────────────────────────────────────
 # XGBoost hyperparameter sweep
-# A direct run measured XGBoost's overfit gap at 2.82 pp — ~4x the DNN's 0.73 pp —
-# at nearly the same test MAPE, meaning the original config (max_depth=5, reg_alpha=0.1,
-# reg_lambda=1.0) fits training data harder than it needs to. This sweep searches a small
-# grid using ONLY the FIRST rolling window's (T, not T_last) internal validation split — the
-# tail of the ORIGINAL training window, entirely BEFORE row T where the test period starts.
-# T_last's own training window was deliberately avoided here: because of the expanding-window
-# design, T_last's "training" rows extend deep into calendar dates that are later reported as
-# test-period performance, so tuning against T_last's validation slice would let the sweep's
-# hyperparameter choice be informed by actual outcomes on some of the very dates later graded
-# in the results table — a soft look-ahead leak into model selection, not into the forecasts
-# themselves. Using T's validation slice (rows entirely before the test window starts)
-# guarantees zero date overlap with anything reported. The winning config is then used, fixed,
-# for every iteration of the rolling loop below (same protocol as the original hardcoded
-# config, just re-tuned).
-# ────────────────────────────────────────────────────────────────────────────
+# Searches a small grid using ONLY the first rolling window's (T, not T_last) internal
+# validation split — rows entirely before the test period starts. T_last's own validation
+# slice is avoided because its training rows extend into dates later graded in the results
+# table, which would let hyperparameter choice be informed by outcomes it's tested on — a
+# soft look-ahead leak into model selection. The winning config is then fixed for every
+# iteration of the rolling loop below.
 
 _Y_sweep, _X_sweep, _ = get_targets_features(df_in=df, T=T, scale=False)
 _val_size_sweep = max(24, round(len(_X_sweep) * 0.10))
@@ -1308,7 +1227,6 @@ for day_idx in tqdm(range(n_test_days), desc='XGBoost rolling h=24'):
     predictions['xgboost'].append(df_Y_pred1_xgb)
     # Append training predictions to the list.
 
-
     globals()['model_xgb'        + str(T_day)] = model_xgb
     globals()['X_train_xgb'      + str(T_day)] = X_train_xgb.copy()
     globals()['X_test_xgb'       + str(T_day)] = X_test_xgb.copy()
@@ -1317,9 +1235,7 @@ for day_idx in tqdm(range(n_test_days), desc='XGBoost rolling h=24'):
     globals()['predictions_xgb_' + str(T_day)] = predictions['xgboost'].copy()
     globals()['forecasts_xgb'    + str(T_day)] = forecasts['xgboost'].copy()
 
-# ────────────────────────────────────────────────────────────────────────────
 # 6.2_ Plotting the test set predictions
-# ────────────────────────────────────────────────────────────────────────────
 
 actual_test_xgb = df[target_h24].iloc[T:T + n_test_hours].values
 # Actual residual demand values over the test period (same as for DNN).
@@ -1366,9 +1282,7 @@ axes[2].grid(alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-# ────────────────────────────────────────────────────────────────────────────
 # 6.3_ Plotting the training set predictions
-# ────────────────────────────────────────────────────────────────────────────
 
 actual_train_xgb = df[target_h24].iloc[:T_last].values
 # Actual residual demand over the training period.
@@ -1404,7 +1318,6 @@ axes[1].grid(alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-# ────────────────────────────────────────────────────────────────────────────
 # 6.4_ Feature Importance
 # XGBoost computes feature importance as the mean **gain** contributed by a feature across all tree splits.
 # Higher gain = the feature creates larger reductions in the loss function.
@@ -1414,7 +1327,6 @@ plt.show()
 # 3. `irradiance_direct_h24` (0.080) — NWP horizon, confirms the h24 meteorological hypothesis.
 # 4. `hour_sin` (0.059)
 # 5. `residual_L312` (0.058)
-# ────────────────────────────────────────────────────────────────────────────
 
 model_xgb_last   = globals()['model_xgb'   + str(T_last)]
 # Retrieve the XGBoost model fitted on the largest training window.
@@ -1445,12 +1357,10 @@ print(f'\nBest n_estimators (early stopping): {model_xgb_last.best_iteration}')
 # best_iteration: the tree count at which early stopping triggered.
 # A value well below 500 means the model converged before the maximum.
 
-# ────────────────────────────────────────────────────────────────────────────
 # 6.5_ Training set MAPE
 # 6.6_ Test set MAPE
 # 6.7_ Overfitting analysis
 # 6.8_ Model selection
-# ────────────────────────────────────────────────────────────────────────────
 
 # Store all metrics in the DataFrames
 training_errors.loc[target_h24, 'xgboost'] = train_mape_xgb
@@ -1488,13 +1398,11 @@ else:
         f'Improvement over naive: {improvement_xgb:.1f} %'
     )
 
-# ────────────────────────────────────────────────────────────────────────────
 # Model Comparison
 # DNN + XGBoost only**
 # The comparison table below aggregates all metrics and includes:
 # - The naive benchmark for context.
 # - Model selection result (beat naive + no overfit).
-# ────────────────────────────────────────────────────────────────────────────
 
 # ── Side-by-side plot: 2 models, first 7 test days
 fig, axes = plt.subplots(1, 2, figsize=(16, 5))
@@ -1528,14 +1436,10 @@ plt.suptitle(
 plt.tight_layout()
 plt.show()
 
-# ────────────────────────────────────────────────────────────────────────────
 # Linear regression baseline
-# A simple OLS model, walk-forward rolling like DNN/XGBoost (same leakage-safe
-# get_targets_features per T_day — training-only calibration/hydro rebuild included), to show
-# whether DNN/XGBoost actually add value over something much simpler than persistence. Test-set
-# predictions only; no hyperparameter tuning, plots, or overfit-gap tracking — this is a
-# comparison baseline, not a candidate model, so it stays intentionally minimal.
-# ────────────────────────────────────────────────────────────────────────────
+# Simple OLS, walk-forward rolling like DNN/XGBoost (same leakage-safe feature pipeline), to
+# show whether DNN/XGBoost add value over something simpler. Test-set predictions only — no
+# tuning, plots, or overfit tracking; a comparison baseline, not a candidate model.
 
 from sklearn.linear_model import LinearRegression
 
@@ -1550,12 +1454,10 @@ linear_mape, linear_wape, linear_smape, linear_r2 = compute_metrics(naive_actual
 print(f'Linear regression: MAPE={linear_mape:.2%}  WAPE={linear_wape:.4f}  '
       f'sMAPE={linear_smape:.2%}  R²={linear_r2:.4f}')
 
-# ────────────────────────────────────────────────────────────────────────────
 # Results summary — relative AND absolute error
 # Percentage metrics (MAPE, WAPE) show relative accuracy; MAE and RMSE report the same
 # errors in MW so the operational magnitude is explicit alongside the ratios. RMSE ≥ MAE,
 # and the gap between them grows with the largest misses (RMSE penalises them more).
-# ────────────────────────────────────────────────────────────────────────────
 
 def rmse_mw(actual, predicted):
     """Root mean squared error in MW."""
@@ -1613,9 +1515,7 @@ forecasts_out = pd.DataFrame({
 forecasts_out.to_csv('forecasts.csv')
 print(f"\nSaved 'results_summary.csv' and 'forecasts.csv' ({len(forecasts_out)} rows) for this run.")
 
-# ────────────────────────────────────────────────────────────────────────────
 # Full test period — Actual vs Ensemble
-# ────────────────────────────────────────────────────────────────────────────
 
 plt.figure(figsize=(16, 5))
 plt.plot(_test_target_dates, _test_actual, color='steelblue', linewidth=0.8, label='Actual Residual Demand')
@@ -1628,9 +1528,7 @@ plt.grid(alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-# ────────────────────────────────────────────────────────────────────────────
 # Ensemble MAE by hour of day
-# ────────────────────────────────────────────────────────────────────────────
 
 _hourly_mae = (
     pd.DataFrame({'hour': _test_target_dates.dt.hour, 'abs_err': np.abs(_test_actual - _pred_ens)})
