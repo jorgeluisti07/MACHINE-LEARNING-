@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Realistic (non-oracle) weather experiment — ETESA Panama 2025 residual demand forecasting
+Realistic Weather Exp — ETESA Panama 2025 residual demand forecasting
 
 The main pipeline's h+24 weather features use shift(-24) on the TRUE MERRA-2 value, not an
 operational forecast — a disclosed "perfect-foresight" upper bound. This script drops those
