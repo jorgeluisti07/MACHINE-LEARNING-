@@ -3,35 +3,23 @@
 """
 Realistic (non-oracle) weather experiment — ETESA Panama 2025 residual demand forecasting
 
-External review (2026-07-23), point #4: the main pipeline's h+24 weather features
-(irradiance_direct_h24, irradiance_diffuse_h24, temperature_h24, wind_speed_h24) use
-shift(-24) on the TRUE MERRA-2 reanalysis value — the actual weather that occurred 24h
-later, not an operational forecast. That's disclosed as a "perfect-foresight" upper bound
-in README.md / MACHINE LEARNING RD CONTEXT.md, but the reviewer asked for a genuine second
-experiment that does NOT use future observed weather, so the perfect-foresight number has
-something realistic to compare against.
+The main pipeline's h+24 weather features use shift(-24) on the TRUE MERRA-2 value, not an
+operational forecast — a disclosed "perfect-foresight" upper bound. This script drops those
+four *_h24 features entirely (no fabricated forecast; no real NWP data available for this
+period), so the perfect-foresight number has something honest to compare against. Everything
+else — data loading, leakage-safe calibration/hydro rebuilds, hour-ending alignment, index
+checks, lag features, DNN/XGBoost/Ensemble, weekly-naive/linear baselines — is identical to
+MACHINE_LEARNING_RESIDUAL_DEMAND.py.
 
-This script is the main pipeline with exactly one structural change: the four *_h24
-weather features are dropped entirely (not replaced with a fabricated forecast — we have
-no real operational NWP data for Panama for this period, so an honest "no future weather
-signal" ablation is the correct choice over inventing forecast error). Everything else —
-data loading, the leakage-safe solar calibration (rebuild_calibration_features), the
-leakage-safe hydro profile (rebuild_hidro_profile_features), the hour-ending demand
-alignment, the index-integrity check, the lag features, DNN/XGBoost/Ensemble, and the
-weekly-naive/linear baselines — is identical to MACHINE_LEARNING_RESIDUAL_DEMAND.py.
-
-Kept deliberately leaner than the main script: no EDA plots, no correlation heatmap, no
-per-model training-set diagnostic plots. This experiment exists to answer one question
-(what does dropping perfect-foresight weather cost us), not to re-run the full EDA.
+Kept leaner than the main script: no EDA plots, correlation heatmap, or diagnostic plots —
+this only answers what dropping perfect-foresight weather costs.
 
 Run: same requirements as the main script (see ../requirements.txt). Calls input() and the
-live Renewables.ninja API, same as MACHINE_LEARNING_RESIDUAL_DEMAND.py — run from the repo
-root so it can find/write DEM2025.csv, solar_eolica_hidro_horario_2025.csv,
-renewables_ninja_2025.csv (reused if present).
+live Renewables.ninja API — run from the repo root so it can find/write DEM2025.csv,
+solar_eolica_hidro_horario_2025.csv, renewables_ninja_2025.csv (reused if present).
 
-Output: results_summary_realistic.csv, forecasts_realistic.csv (distinct filenames from
-the main script's results_summary.csv/forecasts.csv, so running both doesn't clobber
-either's output).
+Output: results_summary_realistic.csv, forecasts_realistic.csv (distinct filenames so
+running both scripts doesn't clobber either's output).
 """
 
 import warnings
@@ -225,16 +213,9 @@ df['residual_L312'] = df['demanda_residual'].shift(LAG_2)
 df['residual_L144'] = df['demanda_residual'].shift(LAG_3)
 df['residual_L48']  = df['demanda_residual'].shift(48)
 
-# NO *_h24 WEATHER FEATURES HERE (review #4) — this is the entire point of this experiment.
-# The main script builds irradiance_direct_h24, irradiance_diffuse_h24, temperature_h24,
-# wind_speed_h24 via shift(-HORIZON) on TRUE future MERRA-2 values. This script deliberately
-# omits all four: a real day-ahead deployment doesn't have perfect knowledge of tomorrow's
-# weather, only (at best) an operational NWP forecast with its own error, which we don't
-# have data for here. Omitting them entirely — rather than fabricating a noised version —
-# is the honest choice: it answers "how much of the oracle run's accuracy came specifically
-# from perfect future-weather knowledge," without inventing forecast-error numbers we can't
-# justify. We DO keep raw ninja h24 shifts below, only so rebuild_calibration_features (which
-# also serves the main script) has a consistent signature — they are never added to cols_order.
+# NO *_h24 weather features here — the entire point of this experiment. Raw ninja h24 shifts
+# are kept below only so rebuild_calibration_features (shared with the main script) has a
+# consistent signature — they're never added to cols_order.
 df['irr_direct_ninja_h24']   = df['irr_direct_ninja'].shift(-HORIZON)
 df['irr_diffuse_ninja_h24']  = df['irr_diffuse_ninja'].shift(-HORIZON)
 
@@ -254,12 +235,9 @@ df['hidro_anomaly_L24'] = (df['hidro_mw'] - _hidro_profile).shift(LAG_1)
 
 df['demanda_residual_h24'] = df['demanda_residual'].shift(-HORIZON)
 
-# Final feature order — 26 flat features + 1 target (30 in the main/oracle script, minus the
-# 4 *_h24 weather features: irradiance_direct_h24, irradiance_diffuse_h24, temperature_h24,
-# wind_speed_h24). Current (non-shifted) irradiance_direct/diffuse/temperature/wind_speed are
-# KEPT — those represent already-observed "now" conditions, legitimately available at
-# forecast time, same as demanda_residual or hidro_mw. Only the perfect-future-knowledge
-# _h24 versions are removed.
+# 26 flat features + 1 target (30 in the main script, minus the 4 *_h24 weather features).
+# Current (non-shifted) irradiance/temperature/wind_speed are kept — already-observed "now"
+# conditions, legitimately available at forecast time.
 cols_order = [
     'irradiance_direct', 'irradiance_diffuse', 'temperature',
     'solar_mw', 'wind_speed', 'eolica_mw', 'hidro_mw',
@@ -283,14 +261,11 @@ print(f'Records:  {len(df):,} hourly ({len(df)/24:.0f} days)')
 print(f'Features: {len(df.columns)-1} flat + 1 target = {len(df.columns)} columns '
       f'(26 model features + 5 ninja-helper plumbing columns)')
 
-# ────────────────────────────────────────────────────────────────────────────
 # Feature extraction (identical logic to the main script)
-# ────────────────────────────────────────────────────────────────────────────
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (mean_absolute_percentage_error, mean_absolute_error,
                               mean_squared_error, r2_score)
-
 
 def compute_metrics(actual, predicted):
     mape = mean_absolute_percentage_error(actual, predicted)
@@ -299,10 +274,8 @@ def compute_metrics(actual, predicted):
     r2 = r2_score(actual, predicted)
     return (mape, wape, smape, r2)
 
-
 def rmse_mw(actual, predicted):
     return float(np.sqrt(mean_squared_error(actual, predicted)))
-
 
 def rebuild_hidro_profile_features(df_in, T):
     """Leakage-safe hydro profile rebuild — identical to the main script's function."""
@@ -315,7 +288,6 @@ def rebuild_hidro_profile_features(df_in, T):
     out['hidro_typical_h24'] = base.shift(-HORIZON).fillna(base)
     out['hidro_anomaly_L24'] = (out['hidro_mw'] - base).shift(LAG_1).fillna(0.0)
     return out
-
 
 def rebuild_calibration_features(df_in, T):
     """Leakage-safe solar calibration rebuild — identical to the main script's function.
@@ -333,12 +305,10 @@ def rebuild_calibration_features(df_in, T):
     out['irradiance_diffuse'] = (out['irr_diffuse_ninja'].to_numpy() * k)
     return out
 
-
 target_h24   = 'demanda_residual_h24'
 features_h24 = [c for c in cols_order if c != target_h24]
 print(f'Model features: {len(features_h24)} (should be 26)')
 assert len(features_h24) == 26, f'Feature count error: {len(features_h24)}'
-
 
 def get_targets_features(df_in, T, scale=False):
     df_in = rebuild_calibration_features(df_in, T)
@@ -357,7 +327,6 @@ def get_targets_features(df_in, T, scale=False):
         return Y_train, X_train, X_test, sx, sy
 
     return Y_train, X_train, X_test
-
 
 T = 7000
 period_selected = len(df) - T
@@ -381,9 +350,7 @@ weekly_naive_mape, weekly_naive_wape, weekly_naive_smape, weekly_naive_r2 = \
 print(f'Weekly-naive: MAPE={weekly_naive_mape:.2%}  WAPE={weekly_naive_wape:.4f}  '
       f'sMAPE={weekly_naive_smape:.2%}  R²={weekly_naive_r2:.4f}')
 
-# ────────────────────────────────────────────────────────────────────────────
 # DNN — Rolling h=24 (same architecture/training regime as the main script)
-# ────────────────────────────────────────────────────────────────────────────
 
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
@@ -392,11 +359,9 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping
 from tqdm import tqdm
 
-
 def set_random_seeds(seed):
     np.random.seed(seed)
     tf.random.set_seed(seed)
-
 
 forecasts = {
     'deep_network': pd.DataFrame(data=np.nan, columns=[target_h24], index=target_time),
@@ -438,10 +403,8 @@ test_mape_dnn, test_wape_dnn, test_smape_dnn, test_r2_dnn = compute_metrics(actu
 print(f'\nDNN Test: MAPE={test_mape_dnn:.2%}  WAPE={test_wape_dnn:.4f}  '
       f'sMAPE={test_smape_dnn:.2%}  R²={test_r2_dnn:.4f}')
 
-# ────────────────────────────────────────────────────────────────────────────
 # XGBoost — Rolling h=24 (same P5 sweep protocol as the main script: validation-only,
 # T window, before the test period)
-# ────────────────────────────────────────────────────────────────────────────
 
 from xgboost import XGBRegressor
 
@@ -520,9 +483,7 @@ importances = dict(zip(features_h24, model_xgb.feature_importances_))
 top10 = dict(sorted(importances.items(), key=lambda x: -x[1])[:10])
 print(f'\nTop 10 features (no h+24 weather available):\n{top10}')
 
-# ────────────────────────────────────────────────────────────────────────────
 # Linear regression baseline
-# ────────────────────────────────────────────────────────────────────────────
 
 from sklearn.linear_model import LinearRegression
 
@@ -538,9 +499,7 @@ linear_mape, linear_wape, linear_smape, linear_r2 = compute_metrics(naive_actual
 print(f'Linear regression: MAPE={linear_mape:.2%}  WAPE={linear_wape:.4f}  '
       f'sMAPE={linear_smape:.2%}  R²={linear_r2:.4f}')
 
-# ────────────────────────────────────────────────────────────────────────────
 # Results summary
-# ────────────────────────────────────────────────────────────────────────────
 
 pred_ens = 0.5 * (pred_test_dnn + pred_test_xgb)
 
