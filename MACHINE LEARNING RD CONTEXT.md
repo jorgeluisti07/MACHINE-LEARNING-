@@ -1,6 +1,6 @@
 # ETESA TFM — Notebook Reference Document
 
-**Version:** v26.21 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble. **ORACLE BASELINE = 8.46% MAPE Ensemble, 59 rolling days (§12.11, supersedes §12.7's 8.18%).** **REALISTIC (non-oracle weather) counterpart = 9.00% MAPE Ensemble; XGBoost (8.89%) and Linear (8.92%) are a near-tie within run-to-run noise for best individual model (§12.11, supersedes §12.8's "Linear is best")**; perfect weather was worth ≈0.3-0.5pp MAPE depending on model. Two new baselines: Linear regression, Weekly-Naive. Weighted-ensemble code removed per user request (§9.2, §8 row 18). External review logged (§12); done: easy/trivial batch (§12.5), correctness batch (§12.6), labeling+lag+baselines batch (§12.7), realistic-weather experiment (§12.8), holdout sign-off + print sweep + comment tightening (§12.9), diagnostic chart review (§12.10), weather hour-convention fix (§12.11, closes the last open item from the external review). Still open: #13 (token env var, deferred by user's choice). **#17 (experimental/weaker model) deliberately deferred (2026-07-24, user's choice) — not a gap, a decision.** Backup/checkpoint protocol in §13.
+**Version:** v26.22 | DNN + XGBoost + Ensemble | Lagged Approach | Leakage-fixed | Shipped model: P5-tuned XGBoost + flat 0.5/0.5 Ensemble. Fixed a documentation contradiction in §2 (the output row wrongly described a varying-horizon single-issue design; the pipeline actually uses a constant h+24 horizon reissued hourly — not a leak, confirmed by independent code review, see the explicit timing-definition note in §2). **ORACLE BASELINE = 8.46% MAPE Ensemble, 59 rolling days (§12.11, supersedes §12.7's 8.18%).** **REALISTIC (non-oracle weather) counterpart = 9.00% MAPE Ensemble; XGBoost (8.89%) and Linear (8.92%) are a near-tie within run-to-run noise for best individual model (§12.11, supersedes §12.8's "Linear is best")**; perfect weather was worth ≈0.3-0.5pp MAPE depending on model. Two new baselines: Linear regression, Weekly-Naive. Weighted-ensemble code removed per user request (§9.2, §8 row 18). External review logged (§12); done: easy/trivial batch (§12.5), correctness batch (§12.6), labeling+lag+baselines batch (§12.7), realistic-weather experiment (§12.8), holdout sign-off + print sweep + comment tightening (§12.9), diagnostic chart review (§12.10), weather hour-convention fix (§12.11, closes the last open item from the external review). Still open: #13 (token env var, deferred by user's choice). **#17 (experimental/weaker model) deliberately deferred (2026-07-24, user's choice) — not a gap, a decision.** Backup/checkpoint protocol in §13.
 
 > **Standing rule:** the Renewables.ninja download code (geocoding prompt, token, API calls) is
 > owned by the user — **do not modify it** without explicit instruction. See §8 row 10.
@@ -47,7 +47,18 @@
 | Data frequency | Hourly (1-hour resolution) |
 | Forecast type | Deterministic point forecast |
 | Validation method | Rolling walk-forward (expanding window), one day per iteration |
-| Output | One 24-hour block per iteration (h+1 through h+24) |
+| Output | 24 rows per iteration, each independently forecast at a **constant h+24 horizon from its own row's timestamp** — not one issue time with varying horizons h+1...h+24 |
+
+**Timing definition, stated explicitly:** this pipeline evaluates fixed h+24 accuracy under hourly
+reissue — i.e., a forecast is conceptually re-generated every hour, always looking exactly 24h
+ahead of that hour. It does not simulate a single daily market-submission forecast issued once
+per day with varying horizons (h+1 for the first hour of the next day, up to h+24 for the last).
+Both are legitimate, standard framings in the STLF literature and in real day-ahead market
+operations; this project uses the constant-horizon one throughout (matches how the `*_h24`
+features, the leakage-safe calibration/hydro rebuilds, and every reported metric are built), and
+this row previously described the other framing by mistake — corrected here to match the actual
+code (v26.22, see the row above and CONTEXT.md's revert-instructions convention if this needs
+tracing back).
 
 ---
 
