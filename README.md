@@ -1,4 +1,4 @@
-# Residual Demand Forecasting — ETESA Panama 2025
+# Residual Demand Forecasting 
 
 Day-ahead (h+24) hourly **residual demand** forecasting for the Panamanian grid, comparing a
 **Deep Neural Network (DNN)** and **XGBoost** (plus their **ensemble**, the best model), evaluated
