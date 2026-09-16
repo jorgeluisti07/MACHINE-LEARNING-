@@ -31,7 +31,7 @@
 
 | Source | Description | Format |
 |---|---|---|
-| Renewables.ninja API | Solar/wind resource data for Coclé, Penonomé, Panama (lat=8.52, lon=-80.36). MERRA-2 reanalysis. 859 MW solar / 336 MW wind. Full year 2025. Location entered interactively at run time (geopy geocoding); token set in the data-download cell. | REST API → JSON |
+| Renewables.ninja API | Solar/wind resource data for Coclé, Penonomé, Panama (lat=8.52, lon=-80.36). MERRA-2 reanalysis. 859 MW solar / 336 MW wind. Full year 2025. Location hardcoded (`place = 'Cocle, Penonome'`, geopy geocoding still runs live against it — see §8 row 19); token set in the data-download cell. | REST API → JSON |
 | `renewables_ninja_2025.csv` | Export of the downloaded API data (all six meteorological columns), written by each run so the exact weather inputs behind a result are preserved. | CSV (generated) |
 | `solar_eolica_hidro_horario_2025.csv` | Real ETESA metered generation: `solar_mw_real`, `eolica_mw_real`, `hidro_mw_real`. Hourly, 2025. | **CSV** |
 | `DEM2025.csv` | Real ETESA hourly electricity demand 2025. Wide format (date × 24 hours, columns `H1`..`H24`). | **CSV** |
@@ -944,7 +944,7 @@ they must be numerically identical between the oracle and realistic runs — con
   complexity's advantage shrinks, and here reverses, once the oracle weather assumption is removed.
 
 **How to run:** `python3 experiments/realistic_weather_ablation.py` from the repo root (same
-requirements as the main script; calls `input()` and the live Renewables.ninja API, same
+requirements as the main script; calls the live Renewables.ninja API, same
 convention as `MACHINE_LEARNING_RESIDUAL_DEMAND.py`).
 
 ### 12.9 Holdout sign-off, print sweep, comment tightening (2026-07-24)

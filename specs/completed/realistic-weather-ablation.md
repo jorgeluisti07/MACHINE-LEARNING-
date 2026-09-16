@@ -58,8 +58,9 @@ reverts it with no effect on the main pipeline.
 ## How to run
 
 `python3 experiments/realistic_weather_ablation.py` from the repo root (same requirements as the
-main script; calls `input()` and the live Renewables.ninja API, same convention as
-`MACHINE_LEARNING_RESIDUAL_DEMAND.py` — see `decisions.md` D-09 on why that flow isn't simplified).
+main script; calls the live Renewables.ninja API, same convention as
+`MACHINE_LEARNING_RESIDUAL_DEMAND.py` — see `decisions.md` D-09 on the geocoding-location line,
+the one part of that flow the user has since asked to simplify).
 
 ## Source
 
