@@ -44,8 +44,8 @@ The meteorological features (`irradiance_direct`, `irradiance_diffuse`, `tempera
 (MERRA-2 reanalysis). Running the download cells requires:
 
 - internet access and a valid Renewables.ninja API token (set in the *data download* cell), and
-- a location for geocoding — the notebook prompts with `input()`, e.g. `Penonomé, Coclé, Panama`,
-  so the query can be pointed at any site.
+- a location for geocoding — hardcoded as `Cocle, Penonome` in the data-download cell; edit that
+  line to point the query at a different site.
 
 After the download, the combined API data is **exported to `renewables_ninja_2025.csv`**, so the
 exact weather inputs behind a run are preserved on disk and results can be traced back to them.
@@ -62,7 +62,7 @@ pip install -r requirements.txt
 jupyter notebook MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb   # run cells top to bottom
 ```
 
-The `.py` mirrors the notebook, but it calls `input()` and the live API, so the notebook
+The `.py` mirrors the notebook, but it calls the live API, so the notebook
 is the intended entry point.
 
 ### 5. Expected output

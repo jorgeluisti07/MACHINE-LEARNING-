@@ -14,8 +14,8 @@ MACHINE_LEARNING_RESIDUAL_DEMAND.py.
 Kept leaner than the main script: no EDA plots, correlation heatmap, or diagnostic plots —
 this only answers what dropping perfect-foresight weather costs.
 
-Run: same requirements as the main script (see ../requirements.txt). Calls input() and the
-live Renewables.ninja API — run from the repo root so it can find/write DEM2025.csv,
+Run: same requirements as the main script (see ../requirements.txt). Calls the live
+Renewables.ninja API — run from the repo root so it can find/write DEM2025.csv,
 solar_eolica_hidro_horario_2025.csv, renewables_ninja_2025.csv (reused if present).
 
 Output: results_summary_realistic.csv, forecasts_realistic.csv (distinct filenames so
@@ -41,7 +41,8 @@ pd.set_option("display.max_columns", None)
 from geopy.geocoders import Nominatim
 
 geolocator = Nominatim(user_agent='etesa_tfm')
-place = input('Enter location (e.g. Penonomé, Coclé, Panama): ')
+place = 'Cocle, Penonome'
+# Hardcoded location for the API query (previously entered interactively via input()).
 information = geolocator.geocode(place)
 lat = information[1][0]
 lon = information[1][1]

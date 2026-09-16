@@ -65,8 +65,8 @@ geolocator = Nominatim(user_agent='etesa_tfm')
 # Create a geolocator object using the OpenStreetMap Nominatim service.
 # user_agent is a required label so the service knows who is calling it.
 
-place = input('Enter location (e.g. Penonomé, Coclé, Panama): ')
-# Ask the user to type the name of the location for the API query.
+place = 'Cocle, Penonome'
+# Hardcoded location for the API query (previously entered interactively via input()).
 
 information = geolocator.geocode(place)
 # Convert the place name into geographic coordinates (geocoding).

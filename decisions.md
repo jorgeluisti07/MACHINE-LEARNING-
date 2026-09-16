@@ -178,6 +178,15 @@ handling specifically).
 
 **Source:** `MACHINE LEARNING RD CONTEXT.md` §8 row 10, standing rule at the top of the file.
 
+**Update (2026-09-16):** the user explicitly asked to hardcode the geocoding location itself (not
+the token or the download/parse flow) so it no longer needs to be typed in at runtime. Per
+explicit instruction this is not a violation of the rule above. `place = input(...)` was replaced
+with `place = 'Cocle, Penonome'` — the exact string the notebook's saved output shows was actually
+typed in the run behind every reported result (resolves to lat=8.5204989, lon=-80.359579, matching
+§0/§1's lat=8.52, lon=-80.36) — in `MACHINE_LEARNING_RESIDUAL_DEMAND.py`,
+`MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb`, and `experiments/realistic_weather_ablation.py`. The
+token and the rest of the download/parse flow are untouched; D-09's rule still stands for those.
+
 ---
 
 ### D-10 — API token stays hardcoded in-repo for now; rotation is the user's action, deferred by choice
