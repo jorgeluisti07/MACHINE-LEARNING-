@@ -6,25 +6,16 @@ Models: Deep Neural Network (DNN) + XGBoost | Horizon h=24 | Lagged Approach
 Converted from MACHINE_LEARNING_RESIDUAL_DEMAND.ipynb
 """
 
-
 import warnings
-warnings.filterwarnings('ignore')
-# Suppress all warnings so the notebook output stays clean.
 
-# ────────────────────────────────────────────────────────────────────────────
 # Horizon **h = 24** (day-ahead, hourly resolution).
 # Two models: **Deep Neural Network (DNN)** and **XGBoost**.
 # Feature approach: **Lagged values** (`use_polynomials = False`),
-# ────────────────────────────────────────────────────────────────────────────
 
-# ────────────────────────────────────────────────────────────────────────────
 # Data Preprocessing
 # Data Preprocessing: clean / organise the input data into the format required by the models. <br>
-# ────────────────────────────────────────────────────────────────────────────
 
-# ────────────────────────────────────────────────────────────────────────────
 # setting the constants
-# ────────────────────────────────────────────────────────────────────────────
 
 use_polynomials = False
 # False means we use the Lagged Values approach
@@ -35,47 +26,38 @@ HORIZON = 24
 # This is the standard operational horizon for electricity market clearing in Panama.
 
 LAG_1 = 24
-# 24-hour lag: same hour yesterday. Used in hydro features.
+# 24-hour lag: same hour yesterday, relative to the CURRENT/input row. Used in hydro STATE
+# features (hidro_fraction_L24, hidro_delta_L24, hidro_anomaly_L24) — those describe "what was
+# the system doing as of now", so input-relative is the correct framing there and is unchanged.
 
-LAG_2 = 336
-# 336-hour lag (= 14 days): same hour two weeks ago.
-# Pearson correlation with target: r = 0.591 (biweekly hydro dispatch cycle).
-
-LAG_3 = 168
-# 168-hour lag (= 7 days): same hour last week.
-# Pearson correlation with target: r = 0.600 — the strongest single lag.
+LAG_2 = 312
+LAG_3 = 144
+# TARGET-relative lags: residual_L{144,312} give the residual demand at the SAME clock-hour,
+# exactly 1/2 weeks before the hour being PREDICTED (target_time = input + 24h), not before the
+# input row itself. Training-only Pearson r confirms this is the stronger framing:
+# r(144) = 0.780, r(312) = 0.764.
 
 MAX_LAG = LAG_2
-# We use LAG_2 = 336 hours as the burn-in period.
+# Burn-in: LAG_2=312 is still the largest backward-looking shift used anywhere (> LAG_3=144,
+# residual_L48's 48, and LAG_1*2=48), so MAX_LAG=LAG_2 remains a correct, sufficient upper bound.
 # The first MAX_LAG rows are dropped after feature construction to avoid NaN values.
 
-# ────────────────────────────────────────────────────────────────────────────
-# LAG_2 (r = 0.591) and LAG_3 (r = 0.600) were chosen over LAG_1 (r ≈ 0) by Pearson correlation analysis.
+# LAG_2 and LAG_3 were chosen over LAG_1 (r ≈ 0 with the target) by Pearson correlation analysis.
 # LAG_1 (24 h) was dropped because it is nearly collinear with the current value of `demanda_residual`,
-# adding no information. The 48-hour lag (r = 0.511) is included as `residual_L48` in the feature list below.
-# ────────────────────────────────────────────────────────────────────────────
+# adding no information. The 48-hour lag (training-only r = 0.575) is included as `residual_L48`
+# in the feature list below — kept input-relative since target_time is always input+24h anyway,
+# so a "48h before input" and "72h before target" framing are just two names for the same feature;
+# there is no clean-week alignment question for it the way there is for the 1- and 2-week lags.
 
-# ────────────────────────────────────────────────────────────────────────────
 # data download
-# ────────────────────────────────────────────────────────────────────────────
 
 import requests, json as _json
-# requests: used to call the Renewables.ninja REST API and download solar/wind resource data.
-# json (aliased _json): parse the API response from JSON format into a Python dictionary.
-
 import pandas as pd
-# pandas: the main library for tabular data manipulation throughout the notebook.
-
 import numpy as np
-# numpy: numerical array operations, used for math (sin, cos, exp) and metric computations.
-
 import matplotlib.pyplot as plt
-# matplotlib: all plots (time-series, error bars, histograms, feature importance bar charts).
 
 pd.set_option("display.max_rows",    None)
 pd.set_option("display.max_columns", None)
-# Show the full DataFrame when we call df in a cell, without truncation.
-# Useful during development to inspect all 31 columns.
 
 from geopy.geocoders import Nominatim
 
@@ -83,8 +65,8 @@ geolocator = Nominatim(user_agent='etesa_tfm')
 # Create a geolocator object using the OpenStreetMap Nominatim service.
 # user_agent is a required label so the service knows who is calling it.
 
-place = input('Enter location (e.g. Penonomé, Coclé, Panama): ')
-# Ask the user to type the name of the location for the API query.
+place = 'Cocle, Penonome'
+# Hardcoded location for the API query (previously entered interactively via input()).
 
 information = geolocator.geocode(place)
 # Convert the place name into geographic coordinates (geocoding).
@@ -142,6 +124,11 @@ r = s.get(url_solar, params=args_solar)
 print('Solar status:', r.status_code)
 # Status 200 means the request succeeded. Any other code indicates an error.
 
+with open('renewables_ninja_solar_raw.json', 'w') as _f:
+    _f.write(r.text)
+# Save the raw, unprocessed API response so a run's exact inputs can be reproduced/verified
+# later, independent of anything this script does to them downstream.
+
 parsed_solar = _json.loads(r.text)
 # Parse the raw JSON text into a Python dictionary.
 
@@ -161,6 +148,9 @@ data = data.set_index('local_time')
 
 # ── Wind ─────────────────────────────────────────────────────────────────────────
 r_wind = s.get(url_wind, params=args_wind)
+with open('renewables_ninja_wind_raw.json', 'w') as _f:
+    _f.write(r_wind.text)
+# Save the raw wind response too, same reproducibility rationale as the solar one above.
 parsed_wind = _json.loads(r_wind.text)
 wind_data = pd.read_json(_json.dumps(parsed_wind['data']), orient='index')
 wind_data['local_time'] = pd.to_datetime(wind_data['local_time']).dt.tz_localize(None)
@@ -178,7 +168,17 @@ df_combined = pd.concat([
 # Concatenate the solar columns and the wind columns side by side (axis=1).
 # dropna() removes any hour where at least one API value is missing.
 
-# ── Load ETESA real-generation data from Parquet ─────────────────────────────────
+df_combined.index = df_combined.index + pd.Timedelta(hours=1)
+# Renewables.ninja labels by interval START (hour-beginning); ETESA files label by interval
+# END (hour-ending, see the H_k -> k:00 fix below). Shifted to match, confirmed empirically
+# (solar ramp/peak/decay land exactly 1h earlier under the old, unshifted join).
+
+df_combined.to_csv('renewables_ninja_2025.csv')
+# Export a copy of the downloaded API data (all six meteorological columns) so the
+# exact weather inputs behind a run are preserved on disk and results can be traced
+# back to them.
+
+# ── Load ETESA real-generation data from CSV ─────────────────────────────────────
 real = pd.read_csv('solar_eolica_hidro_horario_2025.csv', index_col=0, parse_dates=True)
 real.index = pd.to_datetime(real.index)
 # Read the CSV file. index_col=0 restores the datetime index, parse_dates ensures
@@ -190,9 +190,9 @@ df_combined  = df_combined.drop(columns=cols_to_drop).join(real, how='left')
 # Drop any duplicate columns before joining, then left-join to keep every ninja row
 # and attach the real ETESA generation columns.
 
-# ── Load ETESA real demand from Excel ────────────────────────────────────────────
+# ── Load ETESA real demand from CSV ──────────────────────────────────────────────
 demanda_raw = pd.read_csv('DEM2025.csv')
-# CSV already has clean headers: Unnamed:0 (dates), H1..H24 (hourly demand).
+# Wide CSV: first column = dates (Unnamed: 0), H1..H24 = hourly demand.
 
 demanda_raw = demanda_raw.rename(columns={demanda_raw.columns[0]: 'fecha'})
 # Rename the first column to 'fecha' for clarity.
@@ -203,18 +203,26 @@ demanda_long = demanda_raw.melt(id_vars=['fecha'], var_name='hora_str', value_na
 
 demanda_long  = demanda_long.dropna(subset=['fecha'])
 demanda_long['fecha_dt']  = pd.to_datetime(demanda_long['fecha'], errors='coerce')
+
+_bad_dates = sorted(demanda_long.loc[demanda_long['fecha_dt'].isna(), 'fecha'].unique())
+if _bad_dates:
+    print(f'WARNING: dropping {len(_bad_dates)} unparseable date(s) from DEM2025.csv: {_bad_dates}')
+
 demanda_long  = demanda_long.dropna(subset=['fecha_dt'])
 # Parse dates; drop any rows where the date cannot be converted.
 
 demanda_long['hora_num'] = (
-    demanda_long['hora_str'].str.extract(r'(\d+)').astype(float).fillna(0).astype(int) - 1
+    demanda_long['hora_str'].str.extract(r'(\d+)').astype(float).fillna(0).astype(int)
 )
-# Extract the numeric part from 'H1', 'H2', … 'H24' and subtract 1 so hours run 0–23.
+# HOUR-ENDING convention: the generation file runs 2025-01-01 01:00 → 2026-01-01 00:00 =
+# exactly 8760 rows (365×24) — only possible if hours are labeled by when they END (00:00–01:00
+# stamped 01:00). So H_k maps to k:00. Renewables.ninja weather timestamps use hour-BEGINNING
+# instead — shifted to match this convention where df_combined is built, above.
 
 demanda_long['timestamp'] = (
     demanda_long['fecha_dt'] + pd.to_timedelta(demanda_long['hora_num'], unit='h')
 )
-# Build a proper datetime timestamp by adding the hour offset to the date.
+# Build a proper datetime timestamp by adding the hour-ending offset to the date.
 
 demanda_long = demanda_long.set_index('timestamp')[['demanda_mw']].sort_index()
 demanda_long['demanda_mw'] = pd.to_numeric(demanda_long['demanda_mw'], errors='coerce')
@@ -233,27 +241,34 @@ df_combined = df_combined[df_combined.index >= '2025-01-01 01:00:00']
 df = df_combined
 print('Columns:', df.columns.tolist())
 
-# ────────────────────────────────────────────────────────────────────────────
-# calibration
-# The Renewables.ninja API provides MERRA-2 reanalysis data scaled to the installed capacity.
-# However, the real irradiance measured at the Panama solar plants differs from the MERRA-2 signal.
-# We calibrate the irradiance columns by computing the ratio between real ETESA solar generation
-# and the Ninja solar output and applying that ratio to all irradiance features.
-# This ensures that `irradiance_direct` and `irradiance_diffuse` reflect observed conditions
-# rather than a global reanalysis average.
-# ────────────────────────────────────────────────────────────────────────────
+# Index integrity: every lag/shift feature below assumes "N rows back = N hours back". That
+# only holds if the hourly index is complete (no gaps) and unique (no duplicate timestamps).
+_idx = pd.DatetimeIndex(df.index)
+_dupes = _idx[_idx.duplicated()]
+assert _dupes.empty, f'Duplicate timestamps in the hourly index: {list(_dupes[:5])}'
+_full = pd.date_range(_idx.min(), _idx.max(), freq='h')
+_missing = _full.difference(_idx)
+assert _missing.empty, (
+    f'{len(_missing)} missing hour(s) in the index (e.g. {list(_missing[:5])}); '
+    f'row-count-based shifts would be wrong. Reindex to a complete hourly range first.'
+)
+print(f'Index OK: {len(_idx):,} unique, gap-free hourly rows '
+      f'({_idx.min()} → {_idx.max()}).')
 
-solar_ninja  = df['solar_mw'].replace(0, np.nan)
-# The raw Ninja solar column. We replace 0 with NaN to avoid division by zero at night.
+# calibration — LEAKAGE-SAFE, re-fit per rolling window
+# Calibrating irradiance against real solar at the SAME rows later used to build the h24
+# horizon features would leak the target (real solar at t+24) into the inputs. Fix: no
+# calibration here — keep raw ninja values; the actual factor is fit training-only, per
+# rolling window, in rebuild_calibration_features() below (see its docstring for the full
+# derivation). Same discipline as the hydro profile rebuild.
 
-ratio_calib  = (df['solar_mw_real'] / solar_ninja).fillna(1)
-# Compute the calibration ratio: real / ninja. Where ninja is NaN (night hours),
-# the ratio defaults to 1 (no correction — irradiance is zero anyway).
-
-df['irradiance_direct']  = (df['irradiance_direct']  * ratio_calib).fillna(0)
-df['irradiance_diffuse'] = (df['irradiance_diffuse'] * ratio_calib).fillna(0)
-# Scale both irradiance components by the calibration ratio.
-# At night (solar_ninja = 0) both irradiance values are zero
+# Preserve the raw (uncalibrated) ninja signals the per-window calibration needs downstream.
+df['irr_direct_ninja']  = df['irradiance_direct']
+df['irr_diffuse_ninja'] = df['irradiance_diffuse']
+df['solar_ninja']       = df['solar_mw']
+# irradiance_direct / irradiance_diffuse stay as RAW ninja here (a placeholder used only for the
+# EDA/correlation plots below); they are OVERWRITTEN per rolling window by the leakage-safe
+# calibration during modelling, so their prep-time values never reach the models directly.
 
 df['solar_mw']  = df['solar_mw_real']
 df['eolica_mw'] = df['eolica_mw_real']
@@ -263,7 +278,10 @@ df['hidro_mw']  = df['hidro_mw_real']
 
 cols_order = [
     'irradiance_direct','irradiance_diffuse','temperature',
-    'solar_mw','wind_speed','eolica_mw','hidro_mw','demanda_mw'
+    'solar_mw','wind_speed','eolica_mw','hidro_mw','demanda_mw',
+    # Raw ninja helpers kept so rebuild_calibration_features can re-fit per window (not fed to
+    # the models — see the explicit features_h24 definition, which draws from cols_order only).
+    'irr_direct_ninja','irr_diffuse_ninja','solar_ninja',
 ]
 df = df[cols_order]
 # Retain only the base columns we need. All other API columns (e.g. wind_mw from Ninja)
@@ -273,26 +291,18 @@ print(f'Base: {df.shape[1]} cols, {df.shape[0]} records.')
 print(f'hidro_mw — mean={df.hidro_mw.mean():.0f} MW  min={df.hidro_mw.min():.0f}  max={df.hidro_mw.max():.0f}')
 # Print a quick sanity check: typical hydro range for Panama is 600–1400 MW.
 
-# ────────────────────────────────────────────────────────────────────────────
 # check for missing values
-# ────────────────────────────────────────────────────────────────────────────
 
 print(df.isnull().sum())
 # Count the number of NaN values in each column.
 # A non-zero count means we have missing hours that must be handled before modelling.
 
-# ────────────────────────────────────────────────────────────────────────────
 # correct datatypes
-# ────────────────────────────────────────────────────────────────────────────
 
 df.reset_index(inplace=True)
 # Move the datetime index back into a regular column called 'local_time'.
 # This allows us to use .dt accessor methods to extract hour, month, day-of-week.
 
-print(df.dtypes)
-# Inspect the column data types.
-
-# ────────────────────────────────────────────────────────────────────────────
 # feature engineering — calendar and cyclic features
 # The ETESA load follows strong intra-day and intra-week patterns. We encode these using:
 # - **Integer features** (`month`, `hour`, `is_weekday`) for tree models.
@@ -300,8 +310,7 @@ print(df.dtypes)
 # so that the DNN recognises that hour 23 is adjacent to hour 0, and December is adjacent to January.
 # - **Holiday indicator** (`is_holiday`): binary flag for the 14 official Panamanian public holidays in 2025.
 # - **Interaction feature** (`hour_weekday = hour × is_weekday`): captures the midday peak that only
-# occurs on working days — v18 finding, small but consistent gain for tree models.
-# ────────────────────────────────────────────────────────────────────────────
+# occurs on working days — small but consistent gain for tree models.
 
 df['month'] = df['local_time'].dt.month
 # Extract the calendar month (1–12) as an integer feature.
@@ -331,7 +340,6 @@ df['is_holiday'] = df['local_time'].dt.date.map(lambda d: int(d in _holiday_set)
 # Note: is_holiday is a SPARSE binary feature (only 14 days per year = ~1 of the data).
 # It is suitable for flat feature spaces (XGBoost handles sparse splits well),
 
-
 # ── Day-of-week cyclic encoding ───────────────────────────────────────────────────
 df['dow_sin'] = np.sin(2 * np.pi * df['local_time'].dt.dayofweek / 7)
 df['dow_cos'] = np.cos(2 * np.pi * df['local_time'].dt.dayofweek / 7)
@@ -344,9 +352,7 @@ df = df.drop(columns=['local_time'])
 # then remove it from the feature DataFrame.
 
 print(f'Holidays 2025: {len(_panama_holidays_2025)} days → {df.is_holiday.sum()} hours marked')
-print(df.to_string())
 
-# ────────────────────────────────────────────────────────────────────────────
 # target variable and feature construction
 # The **residual demand** is defined as:
 # > `demanda_residual = demanda_mw − solar_mw − eolica_mw`
@@ -357,7 +363,6 @@ print(df.to_string())
 # The **lag features** are the pre-computed shifted values of `demanda_residual`.
 # The NWP horizon features are the meteorological values shifted 24 hours forward (future NWP at the target time).
 # The hydro dispatch features capture the operational state of the hydroelectric fleet.
-# ────────────────────────────────────────────────────────────────────────────
 
 # Target: residual demand
 df['demanda_residual'] = df['demanda_mw'] - df['solar_mw'] - df['eolica_mw']
@@ -374,37 +379,46 @@ df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
 # Encode the month of year cyclically. Period = 12 months.
 
 # ── Lagged target features (Lagged Approach)
-# Pearson correlations with target: r(L168)=0.600 > r(L336)=0.591 > r(L48)=0.511
+# Training-only Pearson correlations with target: r(L144)=0.780 > r(L312)=0.764 > r(L48)=0.575
 # r(L24) ≈ 0  →  dropped (nearly collinear with the current-hour 'demanda_residual').
 
-df['residual_L336'] = df['demanda_residual'].shift(LAG_2)
-# 336-hour lag (2 weeks): captures the biweekly hydroelectric dispatch cycle
-# that is characteristic of Panama's grid management.
+df['residual_L312'] = df['demanda_residual'].shift(LAG_2)
+# 312-hour lag: residual demand at the SAME clock-hour, exactly 2 weeks before the hour being
+# predicted — captures the biweekly hydroelectric dispatch cycle.
 
-df['residual_L168'] = df['demanda_residual'].shift(LAG_3)
-# 168-hour lag (1 week): same hour, same day of the week, last week.
-# Strongest single lag predictor (r = 0.600).
+df['residual_L144'] = df['demanda_residual'].shift(LAG_3)
+# 144-hour lag: residual demand at the SAME clock-hour, exactly 1 week before the hour being
+# predicted. Strongest single lag predictor (r = 0.780).
 
 df['residual_L48']  = df['demanda_residual'].shift(48)
 # 48-hour lag (2 days): captures the mid-week demand build-up pattern.
 
-# NWP Horizon features at t+24
-# Meteorological forecast at the prediction horizon.
-# Standard in day-ahead operational forecasting.
-# Here we use MERRA-2 reanalysis as a perfect-foresight proxy.
-# irradiance_direct_h24 was feature importance #3 in XGBoost (gain = 0.080).
-# Adding these 4 features reduced DNN MAPE from ~9.3 % to 7.08 % (−2.35 pp).
+# NWP Horizon features at t+24 — the h=24 meteorology at the prediction target time.
+#
+# ── LIMITATION: PERFECT-FORESIGHT WEATHER ─────────────────────────────────────
+# These four features are built with shift(-HORIZON), i.e. the TRUE future value of
+# the MERRA-2 reanalysis, not an actual forecast. The full year was pulled from the
+# Renewables.ninja API in one request, so at "prediction time" the model is handed
+# the exact weather that will occur 24 h later. Results therefore assume a PERFECT 24 h
+# weather forecast and are an optimistic upper bound. A real day-ahead deployment would
+# feed operational NWP (e.g. GFS/ECMWF) instead, whose forecast error would raise the
+# reported MAPE/WAPE. Treat the h24 weather block as a perfect-foresight proxy.
 df['irradiance_direct_h24']  = df['irradiance_direct'].shift(-HORIZON)
 df['irradiance_diffuse_h24'] = df['irradiance_diffuse'].shift(-HORIZON)
 df['temperature_h24']        = df['temperature'].shift(-HORIZON)
 df['wind_speed_h24']         = df['wind_speed'].shift(-HORIZON)
-# shift(-24) places the value that occurs 24 hours in the future alongside the current row,
-# making the h=24 NWP forecast available as a feature at training and prediction time.
+# Raw-ninja h+24 shifts, built here (pre-trim, so the shift has successors) and kept so the
+# per-window calibration (rebuild_calibration_features) can rebuild the two irradiance_*_h24
+# columns from ninja × a training-only factor, with no NaN at the tail. Not fed to the models.
+df['irr_direct_ninja_h24']   = df['irr_direct_ninja'].shift(-HORIZON)
+df['irr_diffuse_ninja_h24']  = df['irr_diffuse_ninja'].shift(-HORIZON)
 
 # Hydro dispatch features
-# Note: hidro_mw itself is already in the feature set, but its LEVEL is dangerous
-# (hidro + termica = residual_demand by definition → perfect collinearity if both are used).
-# We encode the operational state through four derived features instead.
+# hidro_mw stays as a raw feature (see cols_order below). hidro_mw + termica_mw = demanda_residual
+# by definition, but termica_mw isn't in this dataset, so hidro_mw alone doesn't fully determine
+# the target — not perfect collinearity. Its low XGBoost importance (gain ≈ 0.005) is redundancy
+# with the already-present demanda_residual feature, not danger. The four derived features below
+# add hydro-specific information (share, trend, seasonal deviation) the raw level doesn't carry.
 
 df['hidro_fraction_L24'] = (
     df['hidro_mw'].shift(LAG_1) /
@@ -418,16 +432,19 @@ df['hidro_delta_L24'] = (
 ).fillna(0)
 # Day-over-day trend in hydro dispatch. Positive = reservoir building, negative = drawing down.
 
+# Seasonal-diurnal hydro baseline = (month, hour) mean of hidro_mw.
+# NOTE: the full-year profile below is used ONLY for EDA / correlation plots and to keep
+# the column layout fixed. During modelling these two columns are REBUILT per rolling
+# window from training-only data by rebuild_hidro_profile_features() (see get_targets_features),
+# so no window is fed a seasonal average that includes months past its own cutoff.
 _hidro_profile = df.groupby(['month', 'hour'])['hidro_mw'].transform('mean')
-# Compute the typical hydro dispatch for each (month, hour) combination across the full year.
-# This is the seasonal-diurnal hydro baseline.
 
+# hidro_typical_h24 = expected hydro at the forecast horizon (h+24).
 df['hidro_typical_h24'] = _hidro_profile.shift(-HORIZON)
-# The expected hydro level at the forecast horizon (h+24), based on the seasonal profile.
 
+# hidro_anomaly_L24 = yesterday's deviation of actual hydro from its seasonal baseline
+# (positive = surplus reservoir conditions; negative = drought / low-water stress).
 df['hidro_anomaly_L24'] = (df['hidro_mw'] - _hidro_profile).shift(LAG_1)
-# Yesterday's deviation of actual hydro from its seasonal baseline.
-# Positive = surplus reservoir conditions; Negative = drought / low-water stress signal.
 
 # Target at h+24
 df['demanda_residual_h24'] = df['demanda_residual'].shift(-HORIZON)
@@ -439,54 +456,63 @@ cols_order = [
     # Current meteorology (7)
     'irradiance_direct', 'irradiance_diffuse', 'temperature',
     'solar_mw', 'wind_speed', 'eolica_mw', 'hidro_mw',
-    # NWP horizon covariates at t+24 (4) ← most impactful group (v22)
+    # NWP horizon covariates at t+24 (4) ← most impactful group
     'irradiance_direct_h24', 'irradiance_diffuse_h24',
     'temperature_h24', 'wind_speed_h24',
     # Calendar features (11)
     'month', 'hour', 'hour_sin', 'hour_cos', 'month_sin', 'month_cos',
     'is_weekday', 'hour_weekday', 'is_holiday', 'dow_sin', 'dow_cos',
-    # Lagged target — Lagged Approach, snn_forec (4)
+    # Lagged target — Lagged Approach (4)
     'demanda_residual',
-    'residual_L48', 'residual_L336', 'residual_L168',
+    'residual_L48', 'residual_L312', 'residual_L144',
     # Hydro dispatch state (4)
     'hidro_fraction_L24', 'hidro_delta_L24', 'hidro_typical_h24', 'hidro_anomaly_L24',
     # Target (1)
     'demanda_residual_h24',
 ]
-df             = df[cols_order]
+# Raw ninja helper columns retained alongside cols_order so rebuild_calibration_features can
+# re-fit the leakage-safe calibration per rolling window. They are NOT model features (features_h24
+# is defined from cols_order only, below), just inputs to the per-window rebuild.
+NINJA_HELPERS  = ['irr_direct_ninja', 'irr_diffuse_ninja', 'solar_ninja',
+                  'irr_direct_ninja_h24', 'irr_diffuse_ninja_h24']
+df             = df[cols_order + NINJA_HELPERS]
 # Trim: drop first MAX_LAG rows (NaN from lag features) and last HORIZON rows (NaN from future shift).
 df             = df.iloc[MAX_LAG:-HORIZON].reset_index(drop=True)
 datetime_index = datetime_index.iloc[MAX_LAG:-HORIZON].reset_index(drop=True)
 # Also trim datetime_index to match the trimmed df row-for-row.
+
+# origin_time / target_time: origin_time[i] = "now", when row i's
+# features are known. The model's prediction at row i is for target_time[i] = origin_time[i]+24h.
+# So a 24-row block starting at T_day is ONE COMPLETED DAY of known inputs (origin_time), used
+# to forecast the FOLLOWING day (target_time). Plots/forecasts below index by target_time, so
+# the x-axis reads the day being predicted, not the day the forecast was issued from.
+origin_time = datetime_index
+target_time = datetime_index + pd.Timedelta(hours=HORIZON)
 
 print(f'Records:  {len(df):,} hourly ({len(df)/24:.0f} days)')
 print(f'Datetime: {datetime_index.iloc[0]} → {datetime_index.iloc[-1]}')
 print(f'Features: {len(df.columns)-1} flat + 1 target = {len(df.columns)} columns')
 print(df.describe().round(2))
 
-# ────────────────────────────────────────────────────────────────────────────
 # Exploratory Data Analysis
 # EDA: inspect the data through plots, autocorrelation, and correlation analysis.
 # This section plot the data → check stationarity → correlation matrix.
-# ────────────────────────────────────────────────────────────────────────────
 
-# ────────────────────────────────────────────────────────────────────────────
 # plot the data
-# ────────────────────────────────────────────────────────────────────────────
 
-df.plot(subplots=True, figsize=(14, 42), layout=(16, 2))
-# Plot each of the 31 columns in its own sub-panel.
+df[cols_order].plot(subplots=True, figsize=(14, 42), layout=(16, 2))
+# Plot each of the 31 model columns (cols_order) in its own sub-panel. df also carries the
+# NINJA_HELPERS plumbing columns, excluded here so the layout stays 31 ≤ 32 slots.
 # layout=(16, 2) gives 32 slots — enough for 31 columns. layout=(9, 2) would fail (only 18 slots).
 plt.tight_layout()
 plt.show()
 
-# ────────────────────────────────────────────────────────────────────────────
 # autocorrelation analysis and target scatter
 # The ACF reveals the dominant periodic structure: peaks at lags 24 (daily), 168 (weekly),
 # and 336 (biweekly). These directly motivate the choice of lag features.
 # The scatter plot confirms that the current residual demand is a useful but imperfect predictor
-# of the 24-hour-ahead target (r ≈ 0.3–0.4), justifying the addition of lag and NWP features.
-# ────────────────────────────────────────────────────────────────────────────
+# of the 24-hour-ahead target (r ≈ 0.69 in the actual run), justifying the addition of lag and
+# NWP features to explain the remaining ~50 % of variance.
 
 from statsmodels.graphics.tsaplots import plot_acf
 from scipy.stats.stats import pearsonr
@@ -518,12 +544,10 @@ axes[1].set_ylabel('target h=24')
 plt.tight_layout()
 plt.show()
 
-# ────────────────────────────────────────────────────────────────────────────
 # correlation matrix
 # If some time series are non-stationary, the Pearson correlation matrix can be misleading
 # (spurious correlations). We use the KPSS test to identify non-stationary columns.
 # A KPSS p-value ≤ 1 % means the series is NOT stationary (null hypothesis = stationarity is rejected).
-# ────────────────────────────────────────────────────────────────────────────
 
 from statsmodels.tsa.stattools import kpss
 
@@ -539,17 +563,18 @@ with warnings.catch_warnings():
 # If p-value = 0.01 (the minimum reported) → NOT stationary.
 print(stationarity)
 
-r = df.corr()
-# Compute the Pearson correlation matrix for all 31 columns.
+r = df[cols_order].corr()
+# Compute the Pearson correlation matrix for the 31 model columns (cols_order), excluding the
+# NINJA_HELPERS plumbing columns.
 
 print('Correlations with target (demanda_residual_h24):')
 print(r['demanda_residual_h24'].drop('demanda_residual_h24').sort_values(ascending=False).round(3))
 # Print the correlation of each feature with the target, sorted highest-to-lowest.
-# Key expected findings:
-#   demanda_residual (current):   r ≈ 0.3–0.4   (direct but weak — NWP needed)
-#   residual_L168:                r ≈ 0.600      (strongest lag)
-#   residual_L336:                r ≈ 0.591
-#   irradiance_direct_h24:        r ≈ -0.4       (high solar → low residual demand)
+# Key expected findings (from the actual run):
+#   demanda_residual (current):   r ≈ 0.69   (strongest single predictor)
+#   residual_L144:                r ≈ 0.78 (training-only; strongest lag, target-relative)
+#   residual_L312:                r ≈ 0.76 (training-only, target-relative)
+#   irradiance_direct_h24:        negative   (high solar → low residual demand)
 
 plt.figure(figsize=(10, 8))
 sns.heatmap(r, vmin=-1, vmax=1, annot=False, cmap='Spectral')
@@ -558,27 +583,21 @@ plt.tight_layout()
 plt.show()
 # Dark red = strong positive correlation;
 
-# ────────────────────────────────────────────────────────────────────────────
-# Data Structures
-# - `predictions` — **dictionary of lists**: each list holds the training-set prediction DataFrame for every rolling iteration.
-# - `forecasts`   — **dictionary of DataFrames**: each DataFrame holds the test-set (day-ahead) forecasts, indexed by datetime.
-# - `errors`      — test-set MAPE per model (primary metric).
-# - `training_errors` — training-set MAPE per model.
-# - Additional DataFrames for WAPE, sMAPE, and R² (both test and training).
-# Two models only: **`deep_network`** (DNN) and **`xgboost`**.
-# ────────────────────────────────────────────────────────────────────────────
+# Data structures: `predictions` (dict of lists, training-set predictions per iteration),
+# `forecasts` (dict of DataFrames, test-set forecasts by datetime), `errors`/`training_errors`
+# (MAPE per model), plus WAPE/sMAPE/R² equivalents. Two models: `deep_network`, `xgboost`.
 
 from sklearn.metrics import (mean_absolute_percentage_error, mean_absolute_error,
                               mean_squared_error, r2_score)
 
 def compute_metrics(actual, predicted):
     """
-    Compute four error metrics: MAPE, WAPE, sMAPE, R² — v24 metric suite.
+    Compute four error metrics: MAPE, WAPE, sMAPE, R².
 
-    MAPE  (Shringi et al. 2025): standard, but sensitive when residual demand approaches zero.
-    WAPE  (Feng et al. 2026)   : uses the sum of actuals as denominator — robust near zero.
-    sMAPE                      : symmetric, bounded 0–200 %, avoids MAPE asymmetry.
-    R²                         : fraction of variance explained; 1.0 = perfect forecast.
+    MAPE : standard, but sensitive when residual demand approaches zero.
+    WAPE : uses the sum of actuals as denominator — robust near zero.
+    sMAPE: symmetric, bounded 0–200 %, avoids MAPE asymmetry.
+    R²   : fraction of variance explained; 1.0 = perfect forecast.
 
     WAPE is consistently ~1 pp lower than MAPE here because during high-solar midday hours
     the residual demand shrinks toward zero, causing MAPE to spike in individual rows.
@@ -614,16 +633,19 @@ predictions = {
 target_h24   = 'demanda_residual_h24'
 # The column name of our prediction target.
 
-features_h24 = [c for c in df.columns if c != target_h24]
-# List of all feature column names — every column except the target.
-# Should be exactly 30 features.
+features_h24 = [c for c in cols_order if c != target_h24]
+# Model feature columns = cols_order minus the target. Drawn from cols_order (NOT df.columns)
+# on purpose: df also carries the NINJA_HELPERS columns for the per-window calibration rebuild,
+# and those must never be fed to the models. Should be exactly 30 features.
 
 forecasts = {
-    k: pd.DataFrame(data=np.nan, columns=[target_h24], index=datetime_index)
+    k: pd.DataFrame(data=np.nan, columns=[target_h24], index=target_time)
     for k in predictions
 }
-# Each DataFrame has one column (target_h24) and one row per hour in the full dataset.
-# Rows in the training window stay NaN; the rolling loop fills in the test window.
+# Each DataFrame has one column (target_h24) and one row per hour in the full dataset, indexed
+# by target_time — the calendar hour actually being predicted, not the hour the
+# forecast was issued from. Rows in the training window stay NaN; the rolling loop fills in the
+# test window. All downstream reads use .iloc (positional), so this label change is safe.
 
 _cols = list(predictions.keys())
 # ['deep_network', 'xgboost'] — used to construct the error DataFrames below.
@@ -639,75 +661,115 @@ training_wape  = pd.DataFrame(index=[target_h24], columns=_cols)
 training_smape = pd.DataFrame(index=[target_h24], columns=_cols)
 training_r2    = pd.DataFrame(index=[target_h24], columns=_cols)
 
-
-print('Data structures initialised — 2 models × 4 metrics.')
-print(f'Features: {len(features_h24)} flat (lagged approach)')
-print(f'Models:   {_cols}')
-
-# ────────────────────────────────────────────────────────────────────────────
 # Feature Extraction via Lagged Approach
 # this is done by the function `get_targets_features`, which returns `Y_train`, `X_train`, `X_test`
 # based on the **lagged values approach** (the parameter `use_polynomials = False`).
-# all lag features (`residual_L48`, `residual_L168`, `residual_L336`) and NWP horizon
+# all lag features (`residual_L48`, `residual_L144`, `residual_L312`) and NWP horizon
 # features (`irradiance_direct_h24`) have already been pre-computed as columns of `df` in Section 1.
 # The function's job here is simply to **slice** the DataFrame at cutoff `T` to produce training and test splits.
 # Below we import the `StandardScaler` which is required when `scale=True` (for the DNN).
 # For XGBoost we use `scale=False` because tree models are scale-invariant.
-# ────────────────────────────────────────────────────────────────────────────
 
 from sklearn.preprocessing import StandardScaler
-# StandardScaler fits a mean and standard deviation to the training data,
-# then transforms it to zero mean and unit variance.
-# It is applied to both X and Y for the DNN (for neural networks).
-# It is NOT applied for XGBoost because gradient-boosted trees do not need normalised inputs.
+# Applied to X and Y for the DNN only. XGBoost is scale-invariant, so scale=False there.
+
+def rebuild_hidro_profile_features(df_in, T):
+    """
+    Recompute the seasonal-diurnal hydro features from TRAINING ROWS ONLY (rows < T).
+
+    Why this exists — leakage prevention:
+    `hidro_typical_h24` and `hidro_anomaly_L24` both depend on a (month, hour) mean of
+    `hidro_mw`. If that mean is taken once over the full dataset it lets an early rolling
+    window "see" hydro levels from months that come after its own cutoff. Here the profile
+    is fitted on rows [:T] only and mapped onto every row by calendar key (month, hour) —
+    the key itself is not leakage. (month, hour) combinations not yet observed in training
+    fall back to the training-window mean of `hidro_mw`.
+
+    Returns a copy of df_in with the two hydro-profile columns overwritten for cutoff T.
+    """
+    train_profile = df_in.iloc[:T].groupby(['month', 'hour'])['hidro_mw'].mean()
+    train_mean    = df_in['hidro_mw'].iloc[:T].mean()
+    keys          = zip(df_in['month'].to_numpy(), df_in['hour'].to_numpy())
+    base          = pd.Series([train_profile.get(k, train_mean) for k in keys],
+                              index=df_in.index, dtype=float)
+
+    out = df_in.copy()
+    # Expected hydro at the forecast horizon (h+24); fillna(base) covers the final rows
+    # where shift(-HORIZON) has no successor.
+    out['hidro_typical_h24'] = base.shift(-HORIZON).fillna(base)
+    # Yesterday's deviation of actual hydro from its (training-only) seasonal baseline.
+    out['hidro_anomaly_L24'] = (out['hidro_mw'] - base).shift(LAG_1).fillna(0.0)
+    return out
+
+def rebuild_calibration_features(df_in, T):
+    """
+    Re-fit the ninja→real solar calibration from TRAINING ROWS ONLY (rows < T) and apply it to
+    the four irradiance features, using ONLY ninja inputs — never target-hour real solar.
+
+    Why this exists — leakage prevention: the factor is a per-hour-of-day mean of
+    (real_solar / ninja_solar) fitted on rows < T only (daytime rows, where ninja_solar > 0)
+    and applied by calendar hour. Because the horizon is +24 h (a whole day), the target's
+    clock-hour equals the current row's clock-hour, so the SAME hourly factor correctly
+    calibrates both the current irradiance and its _h24 shift. Applying it uses only the raw
+    ninja columns (irr_*_ninja, irr_*_ninja_h24) — no real solar from any row ≥ T.
+
+    Returns a copy of df_in with the four irradiance_* columns overwritten for cutoff T.
+    """
+    train = df_in.iloc[:T]
+    day   = train['solar_ninja'] > 0
+    ratio = train.loc[day, 'solar_mw'] / train.loc[day, 'solar_ninja']   # solar_mw is REAL here
+    k_by_hour = ratio.groupby(train.loc[day, 'hour']).mean()
+    k_global  = float(ratio.mean()) if len(ratio) else 1.0
+    k = df_in['hour'].map(k_by_hour).fillna(k_global).to_numpy()
+
+    out = df_in.copy()
+    out['irradiance_direct']      = (out['irr_direct_ninja'].to_numpy()      * k)
+    out['irradiance_diffuse']     = (out['irr_diffuse_ninja'].to_numpy()     * k)
+    out['irradiance_direct_h24']  = (out['irr_direct_ninja_h24'].to_numpy()  * k)
+    out['irradiance_diffuse_h24'] = (out['irr_diffuse_ninja_h24'].to_numpy() * k)
+    return out
 
 def get_targets_features(df_in, T, scale=False):
     """
-    Feature extraction — Lagged Approach (snn_forec pattern).
+    Feature extraction — Lagged Approach.
 
     Parameters
     ----------
     df_in  : DataFrame — the full dataset with all 30 features and the target column.
     T      : int       — training cutoff (number of rows used for training).
-    scale  : bool      — if True, apply StandardScaler to X and Y (for DNN).
+    scale  : bool      — if True, apply StandardScaler to X and Y (for DNN);
                          if False, return raw arrays (for XGBoost).
 
     Returns
     -------
     scale=False → (Y_train, X_train, X_test)
-    scale=True  → (Y_train, X_train, X_test, sx, sy)
-                   where sx = feature scaler, sy = target scaler.
+    scale=True  → (Y_train, X_train, X_test, sx, sy)   # sx, sy = fitted feature/target scalers
 
-    The test window covers the next HORIZON=24 rows starting at row T.
+    The test window covers the next HORIZON=24 rows starting at row T. The seasonal hydro
+    features AND the solar calibration are rebuilt from training-only data (see
+    rebuild_hidro_profile_features and rebuild_calibration_features) so no window is fed
+    information past its own cutoff.
     """
+    df_in = rebuild_calibration_features(df_in, T)
+    df_in = rebuild_hidro_profile_features(df_in, T)
+
     Y_train = df_in[[target_h24]].iloc[:T].copy()
-    # Target column for rows 0…T-1. Shape: (T, 1).
-
     X_train = df_in[features_h24].iloc[:T].copy()
-    # Feature matrix for rows 0…T-1. Shape: (T, 30).
-
     X_test  = df_in[features_h24].iloc[T:T + HORIZON].copy()
-    # Feature matrix for the next 24 rows (one day-ahead forecast window). Shape: (24, 30).
 
     if scale:
+        # Fit scalers on training data only — never on test data (would leak).
         sx = StandardScaler().fit(X_train)
         sy = StandardScaler().fit(Y_train)
-        # Fit scalers on training data only — never on test data (would cause data leakage).
-
         X_train = pd.DataFrame(sx.transform(X_train), columns=X_train.columns)
         X_test  = pd.DataFrame(sx.transform(X_test),  columns=X_test.columns)
         Y_train = pd.DataFrame(sy.transform(Y_train), columns=Y_train.columns)
-        # Apply the same fitted scaler to transform training and test features.
-        # X_test uses the scaler fitted on X_train (same mean and std).
-
         return Y_train, X_train, X_test, sx, sy
 
     return Y_train, X_train, X_test
 
-# ────────────────────────────────────────────────────────────────────────────
 # Below we verify the function by calling it once at the fixed training cutoff T = 7000.
 # We check that the shapes are correct and that the feature count equals exactly 30.
-# ────────────────────────────────────────────────────────────────────────────
 
 T_test = 7000
 Y_v, X_v, Xt_v = get_targets_features(df_in=df, T=T_test)
@@ -723,7 +785,6 @@ print(f'\nFeature list ({len(features_h24)} features):')
 print(features_h24)
 # Print the feature list so it is documented in the notebook output.
 
-# ────────────────────────────────────────────────────────────────────────────
 # Deep Neural Network (DNN) — Rolling h=24
 # > `Dense(256, relu) → Dense(256, relu) → Dense(128, relu) → Dense(1)`
 # - Trained with **Adam optimiser** (learning rate 0.001) and **MSE loss**.
@@ -731,12 +792,9 @@ print(features_h24)
 # - Validation split = 10 % (last 10 % of the training window, preserving temporal order).
 # - Both X and Y are scaled with StandardScaler (for neural networks).
 # - Seed 42 is fixed at each iteration so results are reproducible.
-# **Best result: 7.08 % MAPE, WAPE=0.0616, R²=0.7765, overfit=0.79 pp.**
-# Key finding: adding NWP horizon features reduced DNN MAPE from ~9.3 % to 7.08 % (−2.35 pp).
-# meteorological forecasts outperforms sequential models without them.
-# ────────────────────────────────────────────────────────────────────────────
+# Adding the NWP horizon (*_h24) weather features noticeably improves DNN accuracy over
+# using calendar and lag features alone.
 
-# ────────────────────────────────────────────────────────────────────────────
 # 5.1_ Using Rolling Predictions to train the model
 # The rolling loop below implements **walk-forward (expanding window) validation** — the standard
 # evaluation protocol for time-series forecasting
@@ -747,7 +805,6 @@ print(features_h24)
 # 4. The forecast is stored in `forecasts['deep_network']` and the training predictions in `predictions['deep_network']`.
 # 5. The model object and all intermediate DataFrames are saved in `globals()` under keys like
 # `model_dnn7000`, `X_train_dnn7000`
-# ────────────────────────────────────────────────────────────────────────────
 
 import os, random, tensorflow as tf
 from tensorflow.keras.models import Sequential
@@ -788,8 +845,8 @@ n_test_hours = n_test_days * HORIZON
 print(f'Train:         {T:,} hours ({T/24:.0f} days)')
 print(f'Test:          {period_selected:,} hours ({period_selected/24:.0f} days)')
 print(f'Rolling days:  {n_test_days} iterations ({n_test_hours:,} hours in test)')
-print(f'Test start:    {datetime_index.iloc[T]}')
-print(f'Test end:      {datetime_index.iloc[T + n_test_hours - 1]}')
+print(f'Test origin range (forecasts issued):  {origin_time.iloc[T]} → {origin_time.iloc[T + n_test_hours - 1]}')
+print(f'Test target range (days being forecast): {target_time.iloc[T]} → {target_time.iloc[T + n_test_hours - 1]}')
 
 # ── Naive benchmark ────────────────────────────────────────────────────────────────
 naive_preds  = df['demanda_residual'].iloc[T:T + n_test_hours].values
@@ -799,6 +856,16 @@ naive_actual = df[target_h24].iloc[T:T + n_test_hours].values
 
 naive_mape, naive_wape, naive_smape, naive_r2 = compute_metrics(naive_actual, naive_preds)
 print(f'\nNaive: MAPE={naive_mape:.2%}  WAPE={naive_wape:.4f}  sMAPE={naive_smape:.2%}  R²={naive_r2:.4f}')
+
+# ── Weekly-naive benchmark: predict the SAME clock-hour, exactly one week
+# before the TARGET hour. residual_L144 already IS this value — it's shift(144) of
+# demanda_residual, and 144h before origin_time equals exactly 168h (1 week) before
+# target_time (= origin_time + 24h) — see the LAG_2/LAG_3 comment above. No new computation
+# needed, no leakage risk (same backward-only shift as the existing persistence naive above).
+weekly_naive_preds = df['residual_L144'].iloc[T:T + n_test_hours].values
+weekly_naive_mape, weekly_naive_wape, weekly_naive_smape, weekly_naive_r2 =     compute_metrics(naive_actual, weekly_naive_preds)
+print(f'Weekly-naive: MAPE={weekly_naive_mape:.2%}  WAPE={weekly_naive_wape:.4f}  '
+      f'sMAPE={weekly_naive_smape:.2%}  R²={weekly_naive_r2:.4f}')
 
 for day_idx in tqdm(range(n_test_days), desc='DNN rolling h=24'):
 
@@ -846,18 +913,19 @@ for day_idx in tqdm(range(n_test_days), desc='DNN rolling h=24'):
     df_Y_pred1 = pd.DataFrame(
         scaler_y.inverse_transform(model.predict(X_train, verbose=0)),
         columns=[target_h24],
-        index=datetime_index[:T_day]
+        index=target_time[:T_day]
     )
     # Training-set predictions: inverse-transform from the scaled space back to MW.
-    # index = the actual datetime labels of the training window.
+    # index = target_time — the hour each prediction is actually FOR, not the training
+    # row's own origin hour.
 
     df_Y_pred2 = pd.DataFrame(
         scaler_y.inverse_transform(model.predict(X_test, verbose=0)),
         columns=[target_h24],
-        index=datetime_index[T_day:T_day + HORIZON]
+        index=target_time[T_day:T_day + HORIZON]
     )
     # Test-set predictions (24-hour forecast): inverse-transform to MW.
-    # index = the actual datetime labels of the 24-hour forecast window.
+    # index = target_time — the 24 calendar hours actually being forecast.
 
     forecasts['deep_network'].iloc[T_day:T_day + HORIZON] =         df_Y_pred2[target_h24].values.reshape(-1, 1)
     # Store the 24-hour forecast in the forecasts DataFrame at the correct rows.
@@ -881,10 +949,8 @@ for day_idx in tqdm(range(n_test_days), desc='DNN rolling h=24'):
     # Each key is the variable name plus T_day (an integer).
     # This allows inspection of any specific rolling-window model after the loop finishes.
 
-# ────────────────────────────────────────────────────────────────────────────
 # 5.2_ Plotting the test set predictions
 # Three panels: (1) full test period, (2) first 7 days zoom, (3) absolute error.
-# ────────────────────────────────────────────────────────────────────────────
 
 T_last       = T + (n_test_days - 1) * HORIZON
 # T_last is the training cutoff of the final rolling iteration.
@@ -895,8 +961,9 @@ actual_test  = df[target_h24].iloc[T:T + n_test_hours].values
 pred_test    = forecasts['deep_network'][target_h24].iloc[T:T + n_test_hours].values.astype(float)
 # DNN forecasts for the test period, retrieved from the forecasts DataFrame.
 
-dates_test   = datetime_index.iloc[T:T + n_test_hours]
-# Datetime labels for the test period (used as x-axis in plots).
+dates_test   = target_time.iloc[T:T + n_test_hours]
+# target_time labels for the test period — x-axis is the day being predicted, not the
+# day the forecast was issued from.
 
 test_mape_dnn, test_wape_dnn, test_smape_dnn, test_r2_dnn =     compute_metrics(actual_test, pred_test)
 # Compute all four metrics for the test period.
@@ -938,11 +1005,9 @@ axes[2].grid(alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-# ────────────────────────────────────────────────────────────────────────────
 # 5.3_ Plotting the training set predictions
 # We use `predictions['deep_network'][-1]` — the training predictions of the last rolling iteration
 # (the largest training window).
-# ────────────────────────────────────────────────────────────────────────────
 
 actual_train = df[target_h24].iloc[:T_last].values
 # Actual residual demand values over the training period.
@@ -950,8 +1015,8 @@ actual_train = df[target_h24].iloc[:T_last].values
 pred_train   = predictions['deep_network'][-1][target_h24].values
 # Training-set predictions from the last rolling iteration (largest window).
 
-dates_train  = datetime_index.iloc[:T_last]
-# Datetime labels for the training period.
+dates_train  = target_time.iloc[:T_last]
+# target_time labels for the training period.
 
 train_mape_dnn, train_wape_dnn, train_smape_dnn, train_r2_dnn =     compute_metrics(actual_train, pred_train)
 # Training-set metrics — used in the overfitting analysis below.
@@ -980,16 +1045,14 @@ axes[1].grid(alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-# ────────────────────────────────────────────────────────────────────────────
 # 5.4_ Training set MAPE
 # 5.5_ Test set MAPE
 # 5.6_ Overfitting analysis
 # 5.7_ Naive model benchmark
 # 5.8_ Model selection
 # All four metrics (MAPE, WAPE, sMAPE, R²) for both training and test are stored into the
-# snn_forec error DataFrames. Then we check overfitting (test MAPE − train MAPE)
+# error DataFrames. Then we check overfitting (test MAPE − train MAPE)
 # and run the model selection criteria: beat naive AND overfit < 10 pp.
-# ────────────────────────────────────────────────────────────────────────────
 
 # ── Store all metrics in the error DataFrames
 training_errors.loc[target_h24, 'deep_network'] = train_mape_dnn
@@ -1007,7 +1070,7 @@ errors_r2.loc[target_h24,    'deep_network'] = test_r2_dnn
 does_it_overfit_dnn = float(test_mape_dnn - train_mape_dnn)
 # Overfitting gap = test MAPE − train MAPE.
 # A positive value means the model is generalising imperfectly.
-# The snn_forec threshold is 0.10 (10 pp). DNN target: < 1 pp.
+# Threshold is 0.10 (10 pp). DNN target: < 1 pp.
 
 improvement_dnn = (naive_mape - test_mape_dnn) / naive_mape * 100
 # Percentage improvement over the naive benchmark.
@@ -1029,31 +1092,76 @@ elif does_it_overfit_dnn >= 0.1:
     print(f'The DNN overfits ({does_it_overfit_dnn:.2%} gap). Not recommended for forecasts.')
 else:
     print(
-        f'*** The DNN can be used for forecasting. ***\n'
+        f'*** The DNN is selected for further evaluation. ***\n'
         f'    MAPE={test_mape_dnn:.2%} | R²={test_r2_dnn:.4f} | '
         f'Improvement over naive: {improvement_dnn:.1f} %'
     )
-# Ie a model can be used for forecasts only if:
-#it beats the naive benchmark, AND
-#it does not overfit (test MAPE - train MAPE < 10 pp).
+# This check is a minimum bar, not a readiness verdict: beating naive persistence and staying
+# under a 10pp overfit gap only means the model clears the first two filters. It does NOT by
+# itself mean the model is ready for operational forecasting — see roadmap items on additional
+# baselines (weekly-naive, linear regression) and a realistic (non-oracle) weather experiment.
 
-# ────────────────────────────────────────────────────────────────────────────
 # XGBoost — Rolling h=24
 # Tree models are scale-invariant, so no StandardScaler is applied.
 # The validation set is the last 10 % of the training window, preserving temporal order.
-# **Best result : 7.35 % MAPE, WAPE=0.0621, R²=0.7539, overfit=2.75 pp.**
-# Feature importance confirms that `irradiance_direct_h24` is the 3rd most important feature (gain=0.080),
-# validating the NWP horizon hypothesis.
-# ────────────────────────────────────────────────────────────────────────────
 
-# ────────────────────────────────────────────────────────────────────────────
 # 6.1_ Using Rolling Predictions to train the model
-# ────────────────────────────────────────────────────────────────────────────
 
-import subprocess
-subprocess.check_call(['pip', 'install', 'xgboost', '-q'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 from xgboost import XGBRegressor
 # XGBRegressor: the scikit-learn compatible XGBoost regression interface.
+
+# XGBoost hyperparameter sweep
+# Searches a small grid using ONLY the first rolling window's (T, not T_last) internal
+# validation split — rows entirely before the test period starts. T_last's own validation
+# slice is avoided because its training rows extend into dates later graded in the results
+# table, which would let hyperparameter choice be informed by outcomes it's tested on — a
+# soft look-ahead leak into model selection. The winning config is then fixed for every
+# iteration of the rolling loop below.
+
+_Y_sweep, _X_sweep, _ = get_targets_features(df_in=df, T=T, scale=False)
+_val_size_sweep = max(24, round(len(_X_sweep) * 0.10))
+_X_val_sweep = _X_sweep.iloc[-_val_size_sweep:]
+_y_val_sweep = _Y_sweep.values.ravel()[-_val_size_sweep:]
+_X_tr_sweep  = _X_sweep.iloc[:-_val_size_sweep]
+_y_tr_sweep  = _Y_sweep.values.ravel()[:-_val_size_sweep]
+
+XGB_PARAM_GRID = [
+    # (max_depth, min_child_weight, reg_alpha, reg_lambda, subsample, colsample_bytree)
+    (5, 1,  0.1, 1.0, 0.8, 0.8),   # original config — the baseline this sweep must beat
+    (4, 1,  0.1, 1.0, 0.8, 0.8),
+    (4, 5,  0.3, 2.0, 0.8, 0.8),
+    (4, 5,  0.3, 2.0, 0.7, 0.7),
+    (3, 5,  0.3, 2.0, 0.7, 0.7),
+    (4, 10, 0.5, 3.0, 0.7, 0.7),
+]
+
+_sweep_rows = []
+for _md, _mcw, _ra, _rl, _ss, _cs in XGB_PARAM_GRID:
+    _m = XGBRegressor(
+        n_estimators=500, learning_rate=0.03, max_depth=_md, min_child_weight=_mcw,
+        subsample=_ss, colsample_bytree=_cs, reg_alpha=_ra, reg_lambda=_rl,
+        early_stopping_rounds=20, random_state=42, verbosity=0, n_jobs=-1,
+    )
+    _m.fit(_X_tr_sweep, _y_tr_sweep, eval_set=[(_X_val_sweep, _y_val_sweep)], verbose=False)
+    _val_mape   = mean_absolute_percentage_error(_y_val_sweep, _m.predict(_X_val_sweep)) * 100
+    _train_mape = mean_absolute_percentage_error(_y_tr_sweep, _m.predict(_X_tr_sweep)) * 100
+    _sweep_rows.append({
+        'max_depth': _md, 'min_child_weight': _mcw, 'reg_alpha': _ra, 'reg_lambda': _rl,
+        'subsample': _ss, 'colsample_bytree': _cs,
+        'val_mape': _val_mape, 'train_mape': _train_mape, 'gap': _val_mape - _train_mape,
+    })
+
+_sweep_df = pd.DataFrame(_sweep_rows).sort_values('val_mape').reset_index(drop=True)
+print('XGBoost hyperparameter sweep (validation-only, T window — before the test period, untouched):')
+print(_sweep_df.round(3).to_string())
+
+_best_row = _sweep_df.iloc[0]
+XGB_PARAMS = dict(
+    max_depth=int(_best_row['max_depth']), min_child_weight=int(_best_row['min_child_weight']),
+    reg_alpha=float(_best_row['reg_alpha']), reg_lambda=float(_best_row['reg_lambda']),
+    subsample=float(_best_row['subsample']), colsample_bytree=float(_best_row['colsample_bytree']),
+)
+print(f'\nSelected XGBoost config (lowest validation MAPE): {XGB_PARAMS}')
 
 for day_idx in tqdm(range(n_test_days), desc='XGBoost rolling h=24'):
 
@@ -1083,11 +1191,8 @@ for day_idx in tqdm(range(n_test_days), desc='XGBoost rolling h=24'):
     model_xgb = XGBRegressor(
         n_estimators=500,       # maximum number of boosting rounds (trees)
         learning_rate=0.03,     # shrinkage per round — smaller = more robust
-        max_depth=5,            # maximum tree depth — controls model complexity
-        subsample=0.8,          # fraction of training rows per tree (row subsampling)
-        colsample_bytree=0.8,   # fraction of features per tree (column subsampling)
-        reg_alpha=0.1,          # L1 regularisation on leaf weights
-        reg_lambda=1.0,         # L2 regularisation on leaf weights
+        **XGB_PARAMS,           # max_depth, min_child_weight, reg_alpha, reg_lambda,
+                                 # subsample, colsample_bytree — chosen by the P5 sweep above
         early_stopping_rounds=20,  # CONSTRUCTOR (XGBoost ≥ 2.0 requirement)
         # Stop if validation metric has not improved for 20 consecutive rounds.
         random_state=42,        # random seed for reproducibility
@@ -1105,14 +1210,14 @@ for day_idx in tqdm(range(n_test_days), desc='XGBoost rolling h=24'):
     df_Y_pred1_xgb = pd.DataFrame(
         model_xgb.predict(X_train_xgb),
         columns=[target_h24],
-        index=datetime_index[:T_day]
+        index=target_time[:T_day]
     )
     # Training predictions in MW (no inverse_transform needed — XGBoost is unscaled).
 
     df_Y_pred2_xgb = pd.DataFrame(
         model_xgb.predict(X_test_xgb),
         columns=[target_h24],
-        index=datetime_index[T_day:T_day + HORIZON]
+        index=target_time[T_day:T_day + HORIZON]
     )
     # 24-hour test forecast in MW.
 
@@ -1122,7 +1227,6 @@ for day_idx in tqdm(range(n_test_days), desc='XGBoost rolling h=24'):
     predictions['xgboost'].append(df_Y_pred1_xgb)
     # Append training predictions to the list.
 
-
     globals()['model_xgb'        + str(T_day)] = model_xgb
     globals()['X_train_xgb'      + str(T_day)] = X_train_xgb.copy()
     globals()['X_test_xgb'       + str(T_day)] = X_test_xgb.copy()
@@ -1131,9 +1235,7 @@ for day_idx in tqdm(range(n_test_days), desc='XGBoost rolling h=24'):
     globals()['predictions_xgb_' + str(T_day)] = predictions['xgboost'].copy()
     globals()['forecasts_xgb'    + str(T_day)] = forecasts['xgboost'].copy()
 
-# ────────────────────────────────────────────────────────────────────────────
 # 6.2_ Plotting the test set predictions
-# ────────────────────────────────────────────────────────────────────────────
 
 actual_test_xgb = df[target_h24].iloc[T:T + n_test_hours].values
 # Actual residual demand values over the test period (same as for DNN).
@@ -1141,8 +1243,8 @@ actual_test_xgb = df[target_h24].iloc[T:T + n_test_hours].values
 pred_test_xgb   = forecasts['xgboost'][target_h24].iloc[T:T + n_test_hours].values.astype(float)
 # XGBoost day-ahead forecasts for the test period.
 
-dates_test_xgb  = datetime_index.iloc[T:T + n_test_hours]
-# Datetime labels for the test period.
+dates_test_xgb  = target_time.iloc[T:T + n_test_hours]
+# target_time labels for the test period.
 
 test_mape_xgb, test_wape_xgb, test_smape_xgb, test_r2_xgb =     compute_metrics(actual_test_xgb, pred_test_xgb)
 # All four metrics for the test period.
@@ -1180,9 +1282,7 @@ axes[2].grid(alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-# ────────────────────────────────────────────────────────────────────────────
 # 6.3_ Plotting the training set predictions
-# ────────────────────────────────────────────────────────────────────────────
 
 actual_train_xgb = df[target_h24].iloc[:T_last].values
 # Actual residual demand over the training period.
@@ -1195,9 +1295,9 @@ train_mape_xgb, train_wape_xgb, train_smape_xgb, train_r2_xgb =     compute_metr
 
 fig, axes = plt.subplots(2, 1, figsize=(16, 8))
 
-axes[0].plot(datetime_index.iloc[:T_last], actual_train_xgb,
+axes[0].plot(target_time.iloc[:T_last], actual_train_xgb,
              label='Actual', color='steelblue', linewidth=0.6, alpha=0.8)
-axes[0].plot(datetime_index.iloc[:T_last], pred_train_xgb,
+axes[0].plot(target_time.iloc[:T_last], pred_train_xgb,
              label='XGBoost Training', color='darkorange', linewidth=0.6, alpha=0.8)
 axes[0].set_title(
     f'XGBoost h=24 — Training\n'
@@ -1206,9 +1306,9 @@ axes[0].set_ylabel('MW')
 axes[0].legend()
 axes[0].grid(alpha=0.3)
 
-axes[1].plot(datetime_index.iloc[:zoom_tr], actual_train_xgb[:zoom_tr],
+axes[1].plot(target_time.iloc[:zoom_tr], actual_train_xgb[:zoom_tr],
              color='steelblue',  linewidth=1.2, label='Actual')
-axes[1].plot(datetime_index.iloc[:zoom_tr], pred_train_xgb[:zoom_tr],
+axes[1].plot(target_time.iloc[:zoom_tr], pred_train_xgb[:zoom_tr],
              color='darkorange', linewidth=1.2, label='XGBoost (zoom)')
 axes[1].set_title('XGBoost h=24 — Training first 7 days (zoom)', fontsize=11)
 axes[1].set_ylabel('MW')
@@ -1218,7 +1318,6 @@ axes[1].grid(alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-# ────────────────────────────────────────────────────────────────────────────
 # 6.4_ Feature Importance
 # XGBoost computes feature importance as the mean **gain** contributed by a feature across all tree splits.
 # Higher gain = the feature creates larger reductions in the loss function.
@@ -1227,8 +1326,7 @@ plt.show()
 # 2. `hour` (0.175) — strong diurnal cycle.
 # 3. `irradiance_direct_h24` (0.080) — NWP horizon, confirms the h24 meteorological hypothesis.
 # 4. `hour_sin` (0.059)
-# 5. `residual_L336` (0.058)
-# ────────────────────────────────────────────────────────────────────────────
+# 5. `residual_L312` (0.058)
 
 model_xgb_last   = globals()['model_xgb'   + str(T_last)]
 # Retrieve the XGBoost model fitted on the largest training window.
@@ -1246,7 +1344,7 @@ importance_xgb = pd.Series(
 plt.figure(figsize=(9, 7))
 importance_xgb.plot(kind='barh', color='darkorange')
 # Horizontal bar chart: each bar = one feature, length = importance gain.
-plt.title(f'XGBoost h=24 — Feature Importance v25 (T={T_last})')
+plt.title(f'XGBoost h=24 — Feature Importance (T={T_last})')
 plt.xlabel('Importance (gain)')
 plt.tight_layout()
 plt.show()
@@ -1259,12 +1357,10 @@ print(f'\nBest n_estimators (early stopping): {model_xgb_last.best_iteration}')
 # best_iteration: the tree count at which early stopping triggered.
 # A value well below 500 means the model converged before the maximum.
 
-# ────────────────────────────────────────────────────────────────────────────
 # 6.5_ Training set MAPE
 # 6.6_ Test set MAPE
 # 6.7_ Overfitting analysis
 # 6.8_ Model selection
-# ────────────────────────────────────────────────────────────────────────────
 
 # Store all metrics in the DataFrames
 training_errors.loc[target_h24, 'xgboost'] = train_mape_xgb
@@ -1297,24 +1393,22 @@ elif does_it_overfit_xgb >= 0.1:
     print(f'XGBoost overfits ({does_it_overfit_xgb:.2%} gap). Not recommended for forecasts.')
 else:
     print(
-        f'*** XGBoost can be used for forecasting. ***\n'
+        f'*** XGBoost is selected for further evaluation. ***\n'
         f'    MAPE={test_mape_xgb:.2%} | R²={test_r2_xgb:.4f} | '
         f'Improvement over naive: {improvement_xgb:.1f} %'
     )
 
-# ────────────────────────────────────────────────────────────────────────────
 # Model Comparison
 # DNN + XGBoost only**
 # The comparison table below aggregates all metrics and includes:
 # - The naive benchmark for context.
 # - Model selection result (beat naive + no overfit).
-# ────────────────────────────────────────────────────────────────────────────
 
 # ── Side-by-side plot: 2 models, first 7 test days
 fig, axes = plt.subplots(1, 2, figsize=(16, 5))
 # One panel per model, side by side for direct visual comparison.
 
-dates_plot  = datetime_index.iloc[T:T + n_test_hours]
+dates_plot  = target_time.iloc[T:T + n_test_hours]  # x-axis = day being predicted
 actual_plot = df[target_h24].iloc[T:T + n_test_hours].values
 
 all_preds = {
@@ -1337,7 +1431,117 @@ for ax, (name, preds), color in zip(axes, all_preds.items(), ['orange', 'darkora
     # individual forecast cycles unreadable.
 
 plt.suptitle(
-    'v25 — DNN vs XGBoost | Lagged Approach | 30 Features | First 7 Test Days',
+    'DNN vs XGBoost | Lagged Approach | 30 Features | First 7 Test Days',
     fontsize=12, y=1.02)
+plt.tight_layout()
+plt.show()
+
+# Linear regression baseline
+# Simple OLS, walk-forward rolling like DNN/XGBoost (same leakage-safe feature pipeline), to
+# show whether DNN/XGBoost add value over something simpler. Test-set predictions only — no
+# tuning, plots, or overfit tracking; a comparison baseline, not a candidate model.
+
+from sklearn.linear_model import LinearRegression
+
+linear_preds = np.full(n_test_hours, np.nan)
+for day_idx in tqdm(range(n_test_days), desc='Linear rolling h=24'):
+    T_day = T + day_idx * HORIZON
+    Y_train_lin, X_train_lin, X_test_lin = get_targets_features(df_in=df, T=T_day, scale=False)
+    lin_model = LinearRegression().fit(X_train_lin, Y_train_lin)
+    linear_preds[day_idx * HORIZON:(day_idx + 1) * HORIZON] =         lin_model.predict(X_test_lin).reshape(-1)
+
+linear_mape, linear_wape, linear_smape, linear_r2 = compute_metrics(naive_actual, linear_preds)
+print(f'Linear regression: MAPE={linear_mape:.2%}  WAPE={linear_wape:.4f}  '
+      f'sMAPE={linear_smape:.2%}  R²={linear_r2:.4f}')
+
+# Results summary — relative AND absolute error
+# Percentage metrics (MAPE, WAPE) show relative accuracy; MAE and RMSE report the same
+# errors in MW so the operational magnitude is explicit alongside the ratios. RMSE ≥ MAE,
+# and the gap between them grows with the largest misses (RMSE penalises them more).
+
+def rmse_mw(actual, predicted):
+    """Root mean squared error in MW."""
+    return float(np.sqrt(mean_squared_error(actual, predicted)))
+
+_test_actual = df[target_h24].iloc[T:T + n_test_hours].values.astype(float)
+_pred_dnn = forecasts['deep_network'][target_h24].iloc[T:T + n_test_hours].values.astype(float)
+_pred_xgb = forecasts['xgboost'][target_h24].iloc[T:T + n_test_hours].values.astype(float)
+
+# Ensemble: unweighted mean of the two models' stored forecasts.
+# No retraining involved — the DNN and XGBoost miss on different hours, so
+# averaging tends to cancel part of each model's error.
+_pred_ens = 0.5 * (_pred_dnn + _pred_xgb)
+
+_summary_rows = {
+    'DNN':           _pred_dnn,
+    'XGBoost':       _pred_xgb,
+    'Ensemble':      _pred_ens,
+    'Linear':        linear_preds.astype(float),
+    'Naive':         naive_preds.astype(float),
+    'Weekly-Naive':  weekly_naive_preds.astype(float),
+}
+
+results_summary = pd.DataFrame(
+    [
+        {
+            'MAPE_%':  compute_metrics(_test_actual, _p)[0] * 100,
+            'WAPE_%':  compute_metrics(_test_actual, _p)[1] * 100,
+            'MAE_MW':  mean_absolute_error(_test_actual, _p),
+            'RMSE_MW': rmse_mw(_test_actual, _p),
+        }
+        for _p in _summary_rows.values()
+    ],
+    index=list(_summary_rows.keys()),
+).round({'MAPE_%': 2, 'WAPE_%': 2, 'MAE_MW': 1, 'RMSE_MW': 1})
+
+print('Test-period results (h=24, ' + f'{n_test_days} rolling days):')
+print(results_summary.to_string())
+
+# Persist this run's metrics and forecasts to disk — these files are the ground truth
+# for a given run.
+results_summary.to_csv('results_summary.csv')
+
+_test_origin_dates = origin_time.iloc[T:T + n_test_hours].reset_index(drop=True)
+_test_target_dates = target_time.iloc[T:T + n_test_hours].reset_index(drop=True)
+forecasts_out = pd.DataFrame({
+    'origin_time': _test_origin_dates,   # when the forecast was issued
+    'target_time': _test_target_dates,   # the hour actually being predicted, = origin + 24h
+    'actual':   _test_actual,
+    'dnn':      _pred_dnn,
+    'xgboost':  _pred_xgb,
+    'ensemble': _pred_ens,
+    'naive':    naive_preds.astype(float),
+}).set_index('target_time')
+forecasts_out.to_csv('forecasts.csv')
+print(f"\nSaved 'results_summary.csv' and 'forecasts.csv' ({len(forecasts_out)} rows) for this run.")
+
+# Full test period — Actual vs Ensemble
+
+plt.figure(figsize=(16, 5))
+plt.plot(_test_target_dates, _test_actual, color='steelblue', linewidth=0.8, label='Actual Residual Demand')
+plt.plot(_test_target_dates, _pred_ens, color='crimson', linewidth=0.8, linestyle='--', label='Ensemble Forecast')
+plt.title(f'Full Test Period Forecast (Ensemble Model): {len(_test_target_dates)} Hours')
+plt.xlabel('Target Date')
+plt.ylabel('Residual Demand (MW)')
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# Ensemble MAE by hour of day
+
+_hourly_mae = (
+    pd.DataFrame({'hour': _test_target_dates.dt.hour, 'abs_err': np.abs(_test_actual - _pred_ens)})
+    .groupby('hour')['abs_err'].mean()
+    .reindex(range(24))
+)
+
+plt.figure(figsize=(12, 5))
+plt.bar(_hourly_mae.index, _hourly_mae.values, color=plt.cm.magma(np.linspace(0.05, 0.95, 24)))
+plt.title('Average Forecast Error (MAE) by Hour of Day')
+plt.xlabel('Hour (0-23)')
+plt.ylabel('Mean Absolute Error (MW)')
+plt.xticks(range(24))
+plt.grid(axis='y', alpha=0.3, linestyle='--')
 plt.tight_layout()
 plt.show()
